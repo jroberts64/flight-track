@@ -1,79 +1,44 @@
 import Foundation
 
-/// Decodable models matching the subset of the FlightAware AeroAPI
-/// `GET /flights/{ident}` response we care about.
-/// Docs: https://www.flightaware.com/aeroapi/portal/documentation
-struct AeroFlightsResponse: Decodable {
-    let flights: [AeroFlight]
-}
-
-struct AeroFlight: Decodable {
+/// Result of the backend `lookupFlight` query (see amplify/functions/aeroapi-lookup).
+/// The iOS app never talks to FlightAware directly — this mirrors the Lambda's
+/// normalized `FlightLookupResult` custom type. All datetimes are ISO 8601 strings.
+struct FlightLookupResult {
+    let flightNumber: String
     let faFlightId: String?
-    let ident: String?
-    let status: String?
-    let progressPercent: Int?
-    let cancelled: Bool?
-    let diverted: Bool?
-
-    let origin: AeroAirport?
-    let destination: AeroAirport?
-
+    let status: FlightStatus
+    let originIata: String?
+    let destinationIata: String?
     let scheduledOut: Date?
-    let estimatedOut: Date?
-    let actualOut: Date?
     let scheduledIn: Date?
+    let estimatedOut: Date?
     let estimatedIn: Date?
+    let actualOut: Date?
     let actualIn: Date?
+    let originGate: String?
+    let destinationGate: String?
+    let originTerminal: String?
+    let destinationTerminal: String?
+    let progressPercent: Int?
+    let cached: Bool
 
-    let gateOrigin: String?
-    let gateDestination: String?
-    let terminalOrigin: String?
-    let terminalDestination: String?
-
-    enum CodingKeys: String, CodingKey {
-        case faFlightId = "fa_flight_id"
-        case ident
-        case status
-        case progressPercent = "progress_percent"
-        case cancelled
-        case diverted
-        case origin
-        case destination
-        case scheduledOut = "scheduled_out"
-        case estimatedOut = "estimated_out"
-        case actualOut = "actual_out"
-        case scheduledIn = "scheduled_in"
-        case estimatedIn = "estimated_in"
-        case actualIn = "actual_in"
-        case gateOrigin = "gate_origin"
-        case gateDestination = "gate_destination"
-        case terminalOrigin = "terminal_origin"
-        case terminalDestination = "terminal_destination"
+    /// Applies this live snapshot onto an existing Flight.
+    func apply(to flight: inout Flight) {
+        flight.faFlightId = faFlightId ?? flight.faFlightId
+        flight.status = status
+        flight.progressPercent = progressPercent ?? flight.progressPercent
+        flight.scheduledOut = scheduledOut ?? flight.scheduledOut
+        flight.scheduledIn = scheduledIn ?? flight.scheduledIn
+        flight.estimatedOut = estimatedOut ?? flight.estimatedOut
+        flight.estimatedIn = estimatedIn ?? flight.estimatedIn
+        flight.actualOut = actualOut ?? flight.actualOut
+        flight.actualIn = actualIn ?? flight.actualIn
+        flight.originGate = originGate ?? flight.originGate
+        flight.destinationGate = destinationGate ?? flight.destinationGate
+        flight.originTerminal = originTerminal ?? flight.originTerminal
+        flight.destinationTerminal = destinationTerminal ?? flight.destinationTerminal
+        if let iata = originIata, !iata.isEmpty { flight.originIata = iata }
+        if let iata = destinationIata, !iata.isEmpty { flight.destinationIata = iata }
+        flight.lastRefreshedAt = Date()
     }
-
-    /// Maps AeroAPI's free-form status into our enum.
-    var mappedStatus: FlightStatus {
-        if cancelled == true { return .cancelled }
-        if diverted == true { return .diverted }
-        guard let s = status?.lowercased() else { return .unknown }
-        if s.contains("scheduled") { return .scheduled }
-        if s.contains("boarding") { return .boarding }
-        if s.contains("en route") || s.contains("airborne") { return .enroute }
-        if s.contains("landed") || s.contains("arrived") { return .landed }
-        if s.contains("delayed") { return .delayed }
-        if s.contains("taxi") || s.contains("departed") { return .departed }
-        return .unknown
-    }
-}
-
-struct AeroAirport: Decodable {
-    let code: String?
-    let codeIata: String?
-
-    enum CodingKeys: String, CodingKey {
-        case code
-        case codeIata = "code_iata"
-    }
-
-    var iata: String? { codeIata ?? code }
 }

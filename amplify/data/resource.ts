@@ -1,4 +1,5 @@
 import { type ClientSchema, a, defineData } from '@aws-amplify/backend';
+import { aeroapiLookup } from '../functions/aeroapi-lookup/resource';
 
 /**
  * FlightTrack data model.
@@ -94,6 +95,36 @@ const schema = a.schema({
       allow.owner(),
       allow.authenticated().to(['read', 'update']),
     ]),
+
+  // Normalized result of a server-side AeroAPI lookup (see functions/aeroapi-lookup).
+  FlightLookupResult: a.customType({
+    flightNumber: a.string().required(),
+    faFlightId: a.string(),
+    status: a.string().required(),
+    originIata: a.string(),
+    destinationIata: a.string(),
+    scheduledOut: a.string(),
+    scheduledIn: a.string(),
+    estimatedOut: a.string(),
+    estimatedIn: a.string(),
+    actualOut: a.string(),
+    actualIn: a.string(),
+    originGate: a.string(),
+    destinationGate: a.string(),
+    originTerminal: a.string(),
+    destinationTerminal: a.string(),
+    progressPercent: a.integer(),
+    cached: a.boolean(),
+  }),
+
+  // Server-side flight lookup. The AeroAPI key lives only in the Lambda, and
+  // results are cached in DynamoDB to protect the AeroAPI budget.
+  lookupFlight: a
+    .query()
+    .arguments({ flightNumber: a.string().required(), date: a.string().required() })
+    .returns(a.ref('FlightLookupResult'))
+    .authorization((allow) => [allow.authenticated()])
+    .handler(a.handler.function(aeroapiLookup)),
 });
 
 export type Schema = ClientSchema<typeof schema>;

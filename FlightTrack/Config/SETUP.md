@@ -35,10 +35,17 @@ This writes `amplify_outputs.json` to the repo root. Drag that file into the Xco
 project (target: FlightTrack, "Copy if needed"). `Amplify.configure(with: .amplifyOutputs)`
 will pick it up.
 
-## 5. AeroAPI key (dev)
-1. Copy `Config/Secrets.example.xcconfig` → `Config/Secrets.xcconfig`, paste your key.
-2. Project → Info → Configurations → set Debug & Release to `Secrets.xcconfig`.
-3. In `Info.plist`, add row `AERO_API_KEY` = `$(AERO_API_KEY)`.
+## 5. AeroAPI key (server-side — NOT in the app)
+The app never holds the AeroAPI key. It's stored as an Amplify secret and used only
+by the `aeroapi-lookup` Lambda. The iOS client calls the `lookupFlight` backend query.
+
+Set the secret once (after signing up at flightaware.com/aeroapi/portal/ for a key):
+```bash
+npx ampx sandbox secret set AERO_API_KEY
+# paste the key when prompted
+```
+For a deployed branch, set it via the Amplify console (App settings → Secrets) or
+`npx ampx pipeline-deploy` and the console.
 
 ## 6. Run
 Pick a simulator and ⌘R. Create an account, confirm via the emailed code, sign in,

@@ -28,13 +28,14 @@ real-time family sync run on AWS Amplify Gen 2.
 |------|----------------|
 | `amplify/auth/resource.ts` | Cognito config (email sign-in). |
 | `amplify/data/resource.ts` | Data model + authorization: `UserProfile`, `Flight`, `FamilyLink`. Single source of truth for the backend schema. |
-| `amplify/backend.ts` | Backend entrypoint wiring auth + data. |
+| `amplify/backend.ts` | Backend entrypoint: wires auth + data + the AeroAPI Lambda, and provisions the DynamoDB cache table (TTL) granted to the Lambda. |
+| `amplify/functions/aeroapi-lookup/` | Lambda that proxies FlightAware AeroAPI server-side (key as an Amplify secret) with a DynamoDB cache. Exposed as the `lookupFlight` AppSync query. |
 | `FlightTrack/App/` | App entrypoint (`FlightTrackApp`), `RootView` (auth gate + tabs), `SessionStore` (per-session identity + profile id). |
 | `FlightTrack/Models/` | Domain models (`Flight`/`FlightStatus`, `UserProfile`/`FamilyLink`) + AeroAPI decodables. Decoupled from Amplify codegen on purpose. |
-| `FlightTrack/Services/` | `AmplifyBootstrap`, `AuthService` (Cognito), `FlightRepository` (GraphQL CRUD + real-time subscription), `AeroAPIClient` (FlightAware), `JSONMapping` (JSONValue ↔ domain). |
+| `FlightTrack/Services/` | `AmplifyBootstrap`, `AuthService` (Cognito), `FlightRepository` (GraphQL CRUD + real-time subscription), `AeroAPIClient` (calls the `lookupFlight` backend query — NOT FlightAware directly), `JSONMapping` (JSONValue ↔ domain). |
 | `FlightTrack/ViewModels/` | `FlightsViewModel`, `FamilyViewModel`. |
 | `FlightTrack/Views/` | SwiftUI screens: auth, my-flights + add-flight, family, flight row. |
-| `FlightTrack/Config/` | `Secrets.example.xcconfig` (AeroAPI key template) + `SETUP.md`. |
+| `FlightTrack/Config/` | `SETUP.md` (Xcode project creation + secret setup). |
 | `deploy/` | `github-oidc.yaml` (CI deploy role), `bootstrap-oidc.sh` (one-time role create). |
 | `.github/workflows/deploy-backend.yml` | CI: `ampx pipeline-deploy` on push to main via OIDC. |
 
@@ -87,16 +88,17 @@ row-level auth rules — see "Hardening" below.
 
 ## Secrets
 
-- The AeroAPI key is read from `Info.plist` key `AERO_API_KEY`, supplied via an
-  untracked `Secrets.xcconfig` (gitignored). **Never commit it.**
+- The AeroAPI key is an **Amplify secret** (`AERO_API_KEY`), set via
+  `npx ampx sandbox secret set AERO_API_KEY`. It lives only in the `aeroapi-lookup`
+  Lambda's environment — **it never ships in the iOS app**. The app calls the
+  `lookupFlight` AppSync query instead.
 - `amplify_outputs.json`, `.xcconfig`, `.env*`, `node_modules/`, `.amplify/`, and Xcode
   build output are gitignored.
 
 ## Hardening (before real use) — tracked in README
 
-- [ ] Move AeroAPI calls into an Amplify Function (Lambda) so the key never ships in the
-      app binary. The current `AeroAPIClient` is dev-only.
+- [x] AeroAPI calls proxied through the `aeroapi-lookup` Lambda; key never ships in the app.
+- [x] Cache AeroAPI by flightNumber+date (DynamoDB cache table + TTL).
 - [ ] Tighten cross-family `Flight` read access with a custom resolver/authorizer rather
       than relying on the app sync layer.
 - [ ] Scheduled function to refresh upcoming flights + push status-change notifications.
-- [ ] Rate-limit / cache AeroAPI by flightNumber+date.

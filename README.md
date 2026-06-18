@@ -76,16 +76,24 @@ push to `main`, assuming that role via a short-lived OIDC token.
 > grant for backend CI deploys. It's broader than bin-builder's tight
 > S3+CloudFront role; that's inherent to deploying a stateful backend vs a static site.
 
-### 2. FlightAware AeroAPI key
+### 2. FlightAware AeroAPI key (server-side only)
+
+The AeroAPI key **never ships in the app**. It's stored as an Amplify secret and used
+only by the `aeroapi-lookup` Lambda; the iOS client calls the `lookupFlight` AppSync
+query, and the Lambda caches results in DynamoDB to protect the AeroAPI budget.
 
 1. Sign up at https://www.flightaware.com/aeroapi/portal/ and create an API key.
-2. In Xcode, add the key to the app's config (see `FlightTrack/Services/AeroAPIClient.swift`
-   — it reads `AERO_API_KEY` from the app's `Info.plist` / build settings). Do **not**
-   commit the key. Use an `.xcconfig` or a CI secret.
+   The **Personal** tier ($5/month credit) covers a family-scale app — see notes below.
+2. Set it as a secret:
+   ```bash
+   npx ampx sandbox secret set AERO_API_KEY     # paste the key
+   ```
+   For a deployed branch, set it in the Amplify console (App settings → Secrets).
 
-> Production note: never ship the AeroAPI key inside the app binary. Move AeroAPI calls
-> behind an Amplify Function (Lambda) and have the app call that. The included client is
-> for development; see "Hardening" below.
+> **Budget:** AeroAPI Personal gives ~$5/month (~100 status queries at ~$0.05 each).
+> The Lambda caches by flightNumber+date (5-min TTL) so repeated lookups — and multiple
+> family members watching one flight — share a single upstream call. Don't poll
+> aggressively; the cache is what keeps you inside the free credit.
 
 ### 3. iOS app
 
@@ -108,7 +116,11 @@ Authorization: a user owns their own flights; family members linked via an accep
 
 ## Hardening (before real use)
 
-- [ ] Move AeroAPI calls into a Lambda (`amplify/functions/`) so the key never ships in the app.
+- [x] Move AeroAPI calls into a Lambda (`amplify/functions/aeroapi-lookup/`) so the key
+      never ships in the app. ✅ Done — app calls the `lookupFlight` AppSync query.
+- [x] Rate-limit / cache AeroAPI usage (cache by flightNumber+date). ✅ Done — DynamoDB
+      cache table with TTL, in `backend.ts` + the Lambda handler.
+- [ ] Tighten cross-family `Flight` read access with a custom resolver (currently enforced
+      in the app sync layer).
 - [ ] Add a scheduled function to refresh live status for upcoming flights and push updates.
-- [ ] Rate-limit AeroAPI usage (cache by flightNumber+date).
 - [ ] Add push notifications for status changes (delay, gate change, departure).

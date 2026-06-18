@@ -57,6 +57,32 @@ extension JSONValue {
         )
     }
 
+    var asFlightLookupResult: FlightLookupResult? {
+        guard let number = value(at: "flightNumber")?.stringValue else { return nil }
+        let statusStr = value(at: "status")?.stringValue ?? "UNKNOWN"
+        var cached = false
+        if case let .boolean(b)? = self.value(at: "cached") { cached = b }
+        return FlightLookupResult(
+            flightNumber: number,
+            faFlightId: value(at: "faFlightId")?.stringValue,
+            status: FlightStatus(rawValue: statusStr) ?? .unknown,
+            originIata: value(at: "originIata")?.stringValue,
+            destinationIata: value(at: "destinationIata")?.stringValue,
+            scheduledOut: value(at: "scheduledOut")?.dateValue,
+            scheduledIn: value(at: "scheduledIn")?.dateValue,
+            estimatedOut: value(at: "estimatedOut")?.dateValue,
+            estimatedIn: value(at: "estimatedIn")?.dateValue,
+            actualOut: value(at: "actualOut")?.dateValue,
+            actualIn: value(at: "actualIn")?.dateValue,
+            originGate: value(at: "originGate")?.stringValue,
+            destinationGate: value(at: "destinationGate")?.stringValue,
+            originTerminal: value(at: "originTerminal")?.stringValue,
+            destinationTerminal: value(at: "destinationTerminal")?.stringValue,
+            progressPercent: value(at: "progressPercent")?.intValue,
+            cached: cached
+        )
+    }
+
     var asFlight: Flight? {
         guard let id = value(at: "id")?.stringValue,
               let profileId = value(at: "profileId")?.stringValue,
