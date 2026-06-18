@@ -1,0 +1,50 @@
+name: Deploy Backend
+
+# Deploys the Amplify Gen 2 backend (Cognito + AppSync + DynamoDB) on every push
+# to main. Authenticates to AWS via GitHub OIDC (no stored secrets) by assuming
+# the repo-scoped role created in deploy/github-oidc.yaml.
+#
+# Prereqs (one-time):
+#   1. Deploy deploy/github-oidc.yaml → note the DeployRoleArn output.
+#   2. Set repo variable AMPLIFY_APP_ID (Amplify console app id) — create the app
+#      once via the Amplify console "Deploy with GitHub", or `ampx` first deploy.
+#   3. Update role-to-assume below with the DeployRoleArn (or set it as a var).
+
+on:
+  push:
+    branches: [main]
+
+# Required for OIDC: the workflow needs to mint an id-token.
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-backend-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          # arn:aws:iam::019135476568:role/filght-track-gha-amplify-deploy
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Deploy Amplify backend
+        run: npx ampx pipeline-deploy --branch "${GITHUB_REF_NAME}" --app-id "${AMPLIFY_APP_ID}"
+        env:
+          AMPLIFY_APP_ID: ${{ vars.AMPLIFY_APP_ID }}
+        # AWS_PROFILE intentionally unset — the assumed role provides creds.

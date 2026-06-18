@@ -1,0 +1,28 @@
+# Amplify
+node_modules/
+.amplify/
+amplify_outputs*
+amplifyconfiguration*
+
+# Secrets
+*.xcconfig
+.env
+.env.*
+
+# Xcode
+build/
+DerivedData/
+*.xcuserstate
+*.xcuserdatad/
+xcuserdata/
+.DS_Store
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Swift Package Manager
+.build/
+Packages/
+Package.resolved

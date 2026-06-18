@@ -1,0 +1,77 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  GitHub Actions OIDC federation for deploying the FlightTrack AWS Amplify Gen 2
+  backend from CI. Creates a repo+branch-scoped IAM role that GitHub Actions may
+  assume (via a short-lived OIDC token — no stored secrets) to run
+  `ampx pipeline-deploy`.
+
+  NOTE: the account already has the GitHub OIDC provider (created by the
+  bin-builder stack). Leave CreateOIDCProvider='false' to reuse it — the provider
+  is account-wide and may exist only once.
+
+Parameters:
+  GitHubOrg:
+    Type: String
+    Default: jroberts64
+    Description: GitHub org/user that owns the repo.
+  GitHubRepo:
+    Type: String
+    Default: filght-track
+    Description: Repository name (match the actual GitHub repo name).
+  GitHubRef:
+    Type: String
+    Default: refs/heads/main
+    Description: Git ref allowed to assume the role (branch-scoped).
+  CreateOIDCProvider:
+    Type: String
+    AllowedValues: ['true', 'false']
+    Default: 'false'
+    Description: >
+      Create the GitHub OIDC provider. Keep 'false' — the provider already
+      exists in account 019135476568 (created by bin-builder). Set 'true' only
+      in a fresh account.
+
+Conditions:
+  ShouldCreateOIDC: !Equals [!Ref CreateOIDCProvider, 'true']
+
+Resources:
+  GitHubOIDCProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: ShouldCreateOIDC
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      ThumbprintList:
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+
+  DeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${GitHubRepo}-gha-amplify-deploy'
+      Description: !Sub 'GitHub Actions Amplify backend deploy role for ${GitHubOrg}/${GitHubRepo}'
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub 'arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com'
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                # Scope to exactly this repo AND ref — nothing else can assume it.
+                token.actions.githubusercontent.com:sub: !Sub 'repo:${GitHubOrg}/${GitHubRepo}:ref:${GitHubRef}'
+      ManagedPolicyArns:
+        # AWS-managed policy purpose-built for `ampx pipeline-deploy`. Amplify
+        # Gen 2 provisions Cognito/AppSync/DynamoDB/Lambda/IAM via CDK, so the
+        # action set is broad and not cleanly hand-enumerable — this managed
+        # policy is the AWS-documented grant for backend CI deploys.
+        # https://docs.amplify.aws/swift/deploy-and-host/fullstack-branching/
+        - arn:aws:iam::aws:policy/AmplifyBackendDeployFullAccess
+
+Outputs:
+  DeployRoleArn:
+    Description: Role ARN for the GitHub Actions workflow to assume.
+    Value: !GetAtt DeployRole.Arn
