@@ -18,6 +18,10 @@ import { defineFunction, secret } from '@aws-amplify/backend';
 export const aeroapiLookup = defineFunction({
   name: 'aeroapi-lookup',
   entry: './handler.ts',
+  // This function is the `lookupFlight` resolver, so it must live in the data
+  // stack to avoid a circular dependency between the data and function stacks.
+  // https://docs.amplify.aws/react/build-a-backend/troubleshooting/circular-dependency/
+  resourceGroupName: 'data',
   timeoutSeconds: 20,
   memoryMB: 256,
   environment: {

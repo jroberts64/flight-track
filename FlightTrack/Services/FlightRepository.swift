@@ -139,7 +139,7 @@ final class FlightRepository: ObservableObject {
     // MARK: Shared GraphQL field set
 
     private static let flightFields = """
-    id profileId flightNumber faFlightId departureDate originIata destinationIata
+    id profileId ownerEmail flightNumber faFlightId departureDate originIata destinationIata
     scheduledOut scheduledIn estimatedOut estimatedIn actualOut actualIn
     status originGate destinationGate originTerminal destinationTerminal
     progressPercent lastRefreshedAt note

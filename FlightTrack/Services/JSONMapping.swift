@@ -97,6 +97,7 @@ extension JSONValue {
         return Flight(
             id: id,
             profileId: profileId,
+            ownerEmail: value(at: "ownerEmail")?.stringValue,
             flightNumber: number,
             faFlightId: value(at: "faFlightId")?.stringValue,
             departureDate: depDate,
@@ -140,6 +141,7 @@ extension Flight {
         let iso = ISO8601DateFormatter.flexible
         return [
             "profileId": profileId,
+            "ownerEmail": ownerEmail,
             "flightNumber": flightNumber,
             "faFlightId": faFlightId,
             "departureDate": DateOnly.string(departureDate),

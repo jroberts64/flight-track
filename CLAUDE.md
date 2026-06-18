@@ -29,10 +29,11 @@ real-time family sync run on AWS Amplify Gen 2.
 | `amplify/auth/resource.ts` | Cognito config (email sign-in). |
 | `amplify/data/resource.ts` | Data model + authorization: `UserProfile`, `Flight`, `FamilyLink`. Single source of truth for the backend schema. |
 | `amplify/backend.ts` | Backend entrypoint: wires auth + data + the AeroAPI Lambda, and provisions the DynamoDB cache table (TTL) granted to the Lambda. |
-| `amplify/functions/aeroapi-lookup/` | Lambda that proxies FlightAware AeroAPI server-side (key as an Amplify secret) with a DynamoDB cache. Exposed as the `lookupFlight` AppSync query. |
-| `FlightTrack/App/` | App entrypoint (`FlightTrackApp`), `RootView` (auth gate + tabs), `SessionStore` (per-session identity + profile id). |
+| `amplify/functions/aeroapi-lookup/` | Lambda that proxies FlightAware AeroAPI server-side (key as an Amplify secret) with a DynamoDB cache. Exposed as the `lookupFlight` AppSync query. Pinned to the **data** stack (`resourceGroupName: 'data'`) to avoid a circular dependency. |
+| `amplify/functions/flight-refresh/` | Scheduled (30m) Lambda. Refreshes near-window flights via AeroAPI, diffs, updates, and pushes change alerts via SNS. Creates SNS endpoints lazily. |
+| `FlightTrack/App/` | App entrypoint (`FlightTrackApp`), `AppDelegate` (APNs token via `@UIApplicationDelegateAdaptor`), `RootView` (auth gate + tabs), `SessionStore` (per-session identity + profile id; sets push owner email). |
 | `FlightTrack/Models/` | Domain models (`Flight`/`FlightStatus`, `UserProfile`/`FamilyLink`) + AeroAPI decodables. Decoupled from Amplify codegen on purpose. |
-| `FlightTrack/Services/` | `AmplifyBootstrap`, `AuthService` (Cognito), `FlightRepository` (GraphQL CRUD + real-time subscription), `AeroAPIClient` (calls the `lookupFlight` backend query — NOT FlightAware directly), `JSONMapping` (JSONValue ↔ domain). |
+| `FlightTrack/Services/` | `AmplifyBootstrap`, `AuthService` (Cognito), `FlightRepository` (GraphQL CRUD + real-time subscription), `AeroAPIClient` (calls the `lookupFlight` backend query — NOT FlightAware directly), `PushService` (APNs permission + writes a DeviceToken row), `JSONMapping` (JSONValue ↔ domain). |
 | `FlightTrack/ViewModels/` | `FlightsViewModel`, `FamilyViewModel`. |
 | `FlightTrack/Views/` | SwiftUI screens: auth, my-flights + add-flight, family, flight row. |
 | `FlightTrack/Config/` | `SETUP.md` (Xcode project creation + secret setup). |
@@ -67,11 +68,21 @@ shakeout. "Verify" the backend means: `npx ampx sandbox --once` deploys clean.
   has full CRUD; any authenticated user can *read* (so you can find family by email).
 - **Flight** — owned by one user; carries a cached AeroAPI live-status snapshot
   (status, gates, terminals, scheduled/estimated/actual times, progress). Owner-only.
+  Has a denormalized `ownerEmail` so the refresh Lambda can resolve push recipients
+  without a join — the iOS create path must set it.
 - **FamilyLink** — directed invite (inviterEmail → inviteeEmail) with status
   PENDING/ACCEPTED/DECLINED. When ACCEPTED, the app loads the counterparty's flights.
+- **DeviceToken** — one per device (ownerEmail, APNs token, snsEndpointArn, platform).
+  Owner-writable; the app creates it, the refresh Lambda fills in `snsEndpointArn`
+  lazily. GSI on `ownerEmail` (`deviceTokensByOwnerEmail`) for recipient lookup.
 
 Cross-family read visibility is currently enforced in the **app sync layer**, not the
 row-level auth rules — see "Hardening" below.
+
+**Lambda ↔ data access:** the push Lambdas read/write model tables via **direct
+DynamoDB IAM grants** in `backend.ts` (not the data client). A function bound as an
+AppSync resolver (e.g. `aeroapi-lookup`) must set `resourceGroupName: 'data'` or it
+creates a circular dependency between the data and function nested stacks.
 
 ## Conventions
 
@@ -99,6 +110,7 @@ row-level auth rules — see "Hardening" below.
 
 - [x] AeroAPI calls proxied through the `aeroapi-lookup` Lambda; key never ships in the app.
 - [x] Cache AeroAPI by flightNumber+date (DynamoDB cache table + TTL).
+- [x] Scheduled `flight-refresh` Lambda + SNS push for status changes (off until
+      `ENABLE_PUSH=true` + APNs key; see README "Push notifications").
 - [ ] Tighten cross-family `Flight` read access with a custom resolver/authorizer rather
       than relying on the app sync layer.
-- [ ] Scheduled function to refresh upcoming flights + push status-change notifications.

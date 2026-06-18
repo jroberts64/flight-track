@@ -21,6 +21,7 @@
     "typescript": "^5.5.0"
   },
   "dependencies": {
+    "@aws-sdk/client-sns": "^3.1071.0",
     "aws-amplify": "^6.6.0"
   }
 }

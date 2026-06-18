@@ -52,6 +52,9 @@ const schema = a.schema({
     .model({
       profileId: a.id().required(),
       profile: a.belongsTo('UserProfile', 'profileId'),
+      // Denormalized owner email so the scheduled refresh Lambda can resolve
+      // notification recipients (owner + family) without a join.
+      ownerEmail: a.email(),
 
       // Identity
       flightNumber: a.string().required(), // e.g. "UA328"
@@ -79,6 +82,8 @@ const schema = a.schema({
 
       note: a.string(), // free-text, e.g. "Picking up Mom"
     })
+    // Owner CRUD. The scheduled refresh Lambda reads/updates flights via direct
+    // DynamoDB IAM access (granted in backend.ts), not the data client.
     .authorization((allow) => [allow.owner()]),
 
   FamilyLink: a
@@ -95,6 +100,26 @@ const schema = a.schema({
       allow.owner(),
       allow.authenticated().to(['read', 'update']),
     ]),
+
+  // An APNs device-token registration, so the backend can push to a user's
+  // devices. One row per device; owner-scoped. The refresh Lambda reads these
+  // (by ownerEmail) to know where to send flight-change notifications.
+  DeviceToken: a
+    .model({
+      ownerEmail: a.email().required(), // the signed-in user's email
+      token: a.string().required(),     // APNs device token (hex)
+      // SNS endpoint ARN created when the token is registered with the platform
+      // application; lets the refresh Lambda publish without re-creating it.
+      snsEndpointArn: a.string(),
+      platform: a.string(), // "APNS" or "APNS_SANDBOX"
+    })
+    // Lets the Lambdas look up a user's devices by email.
+    .secondaryIndexes((index) => [index('ownerEmail')])
+    // Owner CRUD: the iOS app writes its own DeviceToken row (token + blank
+    // snsEndpointArn). The flight-refresh Lambda reads these and creates the SNS
+    // endpoint lazily on first push (direct DynamoDB IAM access, granted in
+    // backend.ts), then writes the ARN back.
+    .authorization((allow) => [allow.owner()]),
 
   // Normalized result of a server-side AeroAPI lookup (see functions/aeroapi-lookup).
   FlightLookupResult: a.customType({

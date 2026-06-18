@@ -114,13 +114,54 @@ add the Amplify Swift package (https://github.com/aws-amplify/amplify-swift), ad
 Authorization: a user owns their own flights; family members linked via an accepted
 `FamilyLink` get read access. See `amplify/data/resource.ts`.
 
+## Push notifications
+
+The backend pushes flight-change alerts (delay, gate/terminal change, departed,
+landed, cancelled, diverted) to the flight owner and accepted family members.
+
+How it works:
+- `flight-refresh` Lambda runs every 30 min, refreshes flights within ~3 hours of
+  departure/arrival, diffs against the stored snapshot, and on a meaningful change
+  updates the flight and publishes via **Amazon SNS** (APNs).
+- The iOS app requests notification permission after sign-in, registers with APNs,
+  and writes a `DeviceToken` row. The Lambda creates the SNS endpoint **lazily** on
+  first push (no separate registration Lambda).
+
+### Enabling push (needs an Apple Developer account)
+
+Push is **off by default** so the rest of the app deploys without Apple setup.
+To turn it on:
+
+1. **Apple Developer account** ($99/yr). In the developer portal:
+   - Create an **APNs Auth Key** (Keys → +, enable "Apple Push Notifications service").
+     Download the `.p8` (you can only download it once). Note the **Key ID** and your
+     **Team ID**.
+   - Ensure the app's **Bundle ID** has the Push Notifications capability, and add the
+     "Push Notifications" capability to the target in Xcode.
+2. Deploy with push enabled (these are read at deploy time, NOT runtime secrets —
+   the `.p8` lands in the CloudFormation template, so keep the deploy env private):
+   ```bash
+   export AWS_PROFILE=personal-sso
+   export ENABLE_PUSH=true
+   export APNS_SIGNING_KEY="$(cat AuthKey_XXXXXXXXXX.p8)"
+   export APNS_KEY_ID=XXXXXXXXXX
+   export APNS_TEAM_ID=YYYYYYYYYY
+   export APNS_BUNDLE_ID=com.yourorg.flighttrack
+   export APNS_SANDBOX=true     # for Xcode dev builds; omit/false for TestFlight/App Store
+   npx ampx sandbox
+   ```
+3. Run on a **physical device** (remote push doesn't work in the simulator).
+
+> Remote push requires the production APNs environment for App Store / TestFlight
+> builds and the sandbox environment for development builds — set `APNS_SANDBOX`
+> accordingly. A device registered against one won't receive from the other.
+
 ## Hardening (before real use)
 
 - [x] Move AeroAPI calls into a Lambda (`amplify/functions/aeroapi-lookup/`) so the key
-      never ships in the app. ✅ Done — app calls the `lookupFlight` AppSync query.
-- [x] Rate-limit / cache AeroAPI usage (cache by flightNumber+date). ✅ Done — DynamoDB
-      cache table with TTL, in `backend.ts` + the Lambda handler.
+      never ships in the app. ✅ app calls the `lookupFlight` AppSync query.
+- [x] Cache AeroAPI usage (flightNumber+date, DynamoDB TTL). ✅
+- [x] Scheduled refresh of upcoming flights + push on status changes. ✅
+      (`flight-refresh` + SNS).
 - [ ] Tighten cross-family `Flight` read access with a custom resolver (currently enforced
       in the app sync layer).
-- [ ] Add a scheduled function to refresh live status for upcoming flights and push updates.
-- [ ] Add push notifications for status changes (delay, gate change, departure).

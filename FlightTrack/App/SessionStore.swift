@@ -21,6 +21,12 @@ final class SessionStore: ObservableObject {
             self.email = email
             self.profileId = pid
             self.isReady = true
+
+            // Hand the email to the push service and ask for notification
+            // permission. If APNs already returned a token, it flushes now.
+            PushService.shared.ownerEmail = email
+            PushService.shared.flushPendingIfReady()
+            await PushService.shared.requestAuthorization()
         } catch {
             self.isReady = false
         }
@@ -30,5 +36,6 @@ final class SessionStore: ObservableObject {
         email = ""
         profileId = nil
         isReady = false
+        PushService.shared.ownerEmail = nil
     }
 }

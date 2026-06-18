@@ -53,7 +53,9 @@ struct MyFlightsView: View {
             }
         }
         .task {
-            if let profileId = session.profileId { vm.start(profileId: profileId) }
+            if let profileId = session.profileId {
+                vm.start(profileId: profileId, ownerEmail: session.email)
+            }
         }
     }
 }

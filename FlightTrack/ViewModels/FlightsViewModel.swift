@@ -10,10 +10,12 @@ final class FlightsViewModel: ObservableObject {
 
     private let repo = FlightRepository.shared
     private var profileId: String?
+    private var ownerEmail: String?
     private var subscriptionTask: Task<Void, Never>?
 
-    func start(profileId: String) {
+    func start(profileId: String, ownerEmail: String) {
         self.profileId = profileId
+        self.ownerEmail = ownerEmail
         Task { await reload() }
         subscribe(profileId: profileId)
     }
@@ -38,6 +40,7 @@ final class FlightsViewModel: ObservableObject {
         var flight = Flight(
             id: UUID().uuidString, // placeholder; backend assigns real id on create
             profileId: profileId,
+            ownerEmail: ownerEmail,
             flightNumber: flightNumber.uppercased(),
             faFlightId: nil,
             departureDate: date,
