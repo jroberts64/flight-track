@@ -54,9 +54,17 @@ struct AeroAPIClient {
         switch response {
         case .success(let value):
             json = value
-        case .failure(let errors):
+        case .failure(let responseError):
             // AppSync resolver errors (e.g. "No flight found", AeroAPI 4xx) arrive here.
-            let message = errors.first?.message ?? "Flight lookup failed."
+            let message: String
+            switch responseError {
+            case .error(let errors), .partial(_, let errors):
+                message = errors.first?.message ?? "Flight lookup failed."
+            case .transformationError(_, let apiError):
+                message = apiError.localizedDescription
+            @unknown default:
+                message = "Flight lookup failed."
+            }
             if message.localizedCaseInsensitiveContains("no flight") {
                 throw AeroAPIError.notFound
             }

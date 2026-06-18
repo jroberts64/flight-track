@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import Amplify
 
 /// Wraps Amplify Auth (Cognito) and publishes the current session state.

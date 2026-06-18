@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import Amplify
 
 /// Persistence + sync for flights, profiles, and family links.

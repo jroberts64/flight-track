@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 /// Holds per-session identity that views need after sign-in: the user's email
 /// and their resolved UserProfile id (used to scope flight queries).

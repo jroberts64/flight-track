@@ -1,27 +1,29 @@
-# Creating the Xcode project
+# Xcode project
 
-These Swift sources aren't yet wrapped in an `.xcodeproj` (Xcode projects are binary
-and best generated on your Mac). Here's the 10-minute path to a running app.
+The project already exists: `filght-track/FlightTrack.xcodeproj`, with sources in
+`filght-track/FlightTrack/` (groups: `AppCore`, `Models`, `Services`, `ViewModels`,
+`Views`). It uses a **synchronized file group**, so any `.swift` added under
+`FlightTrack/` is picked up automatically — no manual "Add Files" step.
 
-## 1. Create the project
-1. Xcode → File → New → Project → iOS → App.
-2. Product Name: **FlightTrack**, Interface: **SwiftUI**, Language: **Swift**,
-   minimum deployment **iOS 17.0**.
-3. Save it inside this repo root (so the folder is `filght-track/FlightTrack.xcodeproj`).
-4. Delete the auto-generated `ContentView.swift` and the default `*App.swift` — you'll use
-   the ones in `FlightTrack/App/`.
+Key project settings already applied:
+- `IPHONEOS_DEPLOYMENT_TARGET = 17.0`
+- Amplify Swift package added with products `Amplify`, `AWSCognitoAuthPlugin`,
+  `AWSAPIPlugin`.
+- `FlightTrack/amplify_outputs.json` is in the source dir (gitignored) so the bundle
+  picks it up; `Amplify.configure(with: .amplifyOutputs)` reads it at launch.
 
-## 2. Add the sources
-In Xcode, right-click the project → "Add Files to FlightTrack…" and add the
-`FlightTrack/App`, `Models`, `Services`, `ViewModels`, and `Views` folders
-(choose "Create groups").
+## Build / run
+Open `FlightTrack.xcodeproj` and ⌘R on a simulator, or from the CLI:
+```bash
+SIMID=$(xcrun simctl list devices "iOS 26.5" | grep "iPhone 16 Pro (" | grep -oE "[0-9A-F-]{36}" | head -1)
+xcodebuild -project FlightTrack.xcodeproj -scheme FlightTrack \
+  -destination "id=$SIMID" build
+```
+Requires the iOS 26.5 simulator runtime (`xcodebuild -downloadPlatform iOS`).
 
-## 3. Add Amplify Swift
+## Re-adding the Amplify package (only if the project is ever recreated)
 File → Add Package Dependencies → `https://github.com/aws-amplify/amplify-swift`
-Add these products to the FlightTrack target:
-- `Amplify`
-- `AWSCognitoAuthPlugin`
-- `AWSAPIPlugin`
+Add to the FlightTrack target: `Amplify`, `AWSCognitoAuthPlugin`, `AWSAPIPlugin`.
 
 ## 4. Generate the backend + outputs
 From the repo root in Terminal. This account uses AWS SSO:
