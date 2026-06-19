@@ -78,7 +78,7 @@ final class PushService: ObservableObject {
         ]
         do {
             _ = try await Amplify.API.mutate(
-                request: GraphQLRequest(document: doc, variables: ["input": input], responseType: JSONValue.self)
+                request: GQL.userPool(doc, variables: ["input": input])
             )
         } catch {
             // If it already exists, update the token instead.
@@ -99,7 +99,7 @@ final class PushService: ObservableObject {
             "platform": isSandbox ? "APNS_SANDBOX" : "APNS",
         ]
         _ = try? await Amplify.API.mutate(
-            request: GraphQLRequest(document: doc, variables: ["input": input], responseType: JSONValue.self)
+            request: GQL.userPool(doc, variables: ["input": input])
         )
     }
 }

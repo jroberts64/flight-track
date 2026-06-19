@@ -78,7 +78,7 @@ final class FamilyViewModel: ObservableObject {
         ]
         do {
             _ = try await Amplify.API.mutate(
-                request: GraphQLRequest(document: doc, variables: vars, responseType: JSONValue.self)
+                request: GQL.userPool(doc, variables: vars)
             )
             await reload()
         } catch {
@@ -97,7 +97,7 @@ final class FamilyViewModel: ObservableObject {
         ]
         do {
             _ = try await Amplify.API.mutate(
-                request: GraphQLRequest(document: doc, variables: vars, responseType: JSONValue.self)
+                request: GQL.userPool(doc, variables: vars)
             )
             await reload()
         } catch {
@@ -116,7 +116,7 @@ final class FamilyViewModel: ObservableObject {
         }
         """
         let result: GraphQLResponse<JSONValue> = try await Amplify.API.query(
-            request: GraphQLRequest(document: doc, variables: ["email": myEmail.lowercased()], responseType: JSONValue.self)
+            request: GQL.userPool(doc, variables: ["email": myEmail.lowercased()])
         )
         let items = try result.get().value(at: "listFamilyLinks.items")?.arrayValue ?? []
         return items.compactMap { item -> FamilyLink? in

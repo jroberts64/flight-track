@@ -43,7 +43,7 @@ final class FlightRepository: ObservableObject {
             ],
         ]
         let result: GraphQLResponse<JSONValue> = try await Amplify.API.mutate(
-            request: GraphQLRequest(document: doc, variables: vars, responseType: JSONValue.self)
+            request: GQL.userPool(doc, variables: vars)
         )
         let json = try result.get()
         guard let id = json.value(at: "createUserProfile.id")?.stringValue else {
@@ -61,7 +61,7 @@ final class FlightRepository: ObservableObject {
         }
         """
         let result: GraphQLResponse<JSONValue> = try await Amplify.API.query(
-            request: GraphQLRequest(document: doc, variables: ["email": email], responseType: JSONValue.self)
+            request: GQL.userPool(doc, variables: ["email": email])
         )
         let json = try result.get()
         guard let item = json.value(at: "listUserProfiles.items")?.arrayValue?.first else { return nil }
@@ -79,7 +79,7 @@ final class FlightRepository: ObservableObject {
         }
         """
         let result: GraphQLResponse<JSONValue> = try await Amplify.API.query(
-            request: GraphQLRequest(document: doc, variables: ["profileId": profileId], responseType: JSONValue.self)
+            request: GQL.userPool(doc, variables: ["profileId": profileId])
         )
         // Tolerate partial responses: AppSync may return data alongside per-item
         // field errors (e.g. a row failing an auth check). Use whatever data is
@@ -111,7 +111,7 @@ final class FlightRepository: ObservableObject {
         }
         """
         let result: GraphQLResponse<JSONValue> = try await Amplify.API.mutate(
-            request: GraphQLRequest(document: doc, variables: ["input": flight.createInput], responseType: JSONValue.self)
+            request: GQL.userPool(doc, variables: ["input": flight.createInput])
         )
         guard let created = try result.get().value(at: "createFlight")?.asFlight else {
             throw RepoError.malformedResponse
@@ -126,7 +126,7 @@ final class FlightRepository: ObservableObject {
         }
         """
         _ = try await Amplify.API.mutate(
-            request: GraphQLRequest(document: doc, variables: ["input": flight.updateInput], responseType: JSONValue.self)
+            request: GQL.userPool(doc, variables: ["input": flight.updateInput])
         )
     }
 
@@ -137,7 +137,7 @@ final class FlightRepository: ObservableObject {
         }
         """
         _ = try await Amplify.API.mutate(
-            request: GraphQLRequest(document: doc, variables: ["input": ["id": id]], responseType: JSONValue.self)
+            request: GQL.userPool(doc, variables: ["input": ["id": id]])
         )
     }
 
@@ -166,7 +166,7 @@ final class FlightRepository: ObservableObject {
         }
         """
         let result: GraphQLResponse<JSONValue> = try await Amplify.API.query(
-            request: GraphQLRequest(document: doc, variables: ["email": email], responseType: JSONValue.self)
+            request: GQL.userPool(doc, variables: ["email": email])
         )
         let items = try result.get().value(at: "listFamilyLinks.items")?.arrayValue ?? []
         return items.compactMap { item -> String? in
@@ -186,7 +186,7 @@ final class FlightRepository: ObservableObject {
         """
         let vars: [String: Any] = ["input": ["id": flightId, "viewers": viewers]]
         _ = try await Amplify.API.mutate(
-            request: GraphQLRequest(document: doc, variables: vars, responseType: JSONValue.self)
+            request: GQL.userPool(doc, variables: vars)
         )
     }
 
@@ -214,11 +214,7 @@ final class FlightRepository: ObservableObject {
         }
         """
         return Amplify.API.subscribe(
-            request: GraphQLRequest(
-                document: doc,
-                variables: ["ownerEmail": ownerEmail.lowercased()],
-                responseType: JSONValue.self
-            )
+            request: GQL.userPool(doc, variables: ["ownerEmail": ownerEmail.lowercased()])
         )
     }
 

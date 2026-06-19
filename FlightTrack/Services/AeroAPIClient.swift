@@ -37,11 +37,7 @@ struct AeroAPIClient {
           }
         }
         """
-        let request = GraphQLRequest(
-            document: doc,
-            variables: ["flightNumber": ident.uppercased(), "date": dateStr],
-            responseType: JSONValue.self
-        )
+        let request = GQL.userPool(doc, variables: ["flightNumber": ident.uppercased(), "date": dateStr])
 
         let response: GraphQLResponse<JSONValue>
         do {
