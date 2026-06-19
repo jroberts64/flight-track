@@ -81,7 +81,25 @@ final class FlightRepository: ObservableObject {
         let result: GraphQLResponse<JSONValue> = try await Amplify.API.query(
             request: GraphQLRequest(document: doc, variables: ["profileId": profileId], responseType: JSONValue.self)
         )
-        let json = try result.get()
+        // Tolerate partial responses: AppSync may return data alongside per-item
+        // field errors (e.g. a row failing an auth check). Use whatever data is
+        // present rather than throwing the whole list away.
+        let json: JSONValue
+        switch result {
+        case .success(let value):
+            json = value
+        case .failure(let responseError):
+            switch responseError {
+            case .partial(let value, _):
+                json = value
+            case .error(let errors):
+                throw RepoError.graphQL(errors.first?.message ?? "Query failed")
+            case .transformationError:
+                throw RepoError.malformedResponse
+            @unknown default:
+                throw RepoError.malformedResponse
+            }
+        }
         let items = json.value(at: "listFlights.items")?.arrayValue ?? []
         return items.compactMap { $0.asFlight }.sorted { ($0.effectiveDeparture ?? .distantFuture) < ($1.effectiveDeparture ?? .distantFuture) }
     }
@@ -214,4 +232,14 @@ final class FlightRepository: ObservableObject {
     """
 }
 
-enum RepoError: Error { case malformedResponse }
+enum RepoError: Error, LocalizedError {
+    case malformedResponse
+    case graphQL(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .malformedResponse: return "The server response couldn't be read."
+        case .graphQL(let m): return m
+        }
+    }
+}
