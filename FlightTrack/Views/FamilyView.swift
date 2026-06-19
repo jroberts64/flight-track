@@ -59,6 +59,6 @@ struct FamilyView: View {
                 Text(vm.errorMessage ?? "")
             }
         }
-        .task { vm.start(myEmail: session.email) }
+        .task { vm.start(myEmail: session.email, myProfileId: session.profileId ?? "") }
     }
 }

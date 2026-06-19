@@ -5,8 +5,11 @@ import Foundation
 struct Flight: Identifiable, Hashable, Codable {
     var id: String
     var profileId: String
-    /// Denormalized owner email — lets the backend refresh/notify without a join.
+    /// Denormalized owner email — owner-auth identifier + lets the backend
+    /// refresh/notify without a join.
     var ownerEmail: String?
+    /// Emails allowed to read this flight: owner + accepted family members.
+    var viewers: [String]?
 
     var flightNumber: String
     var faFlightId: String?

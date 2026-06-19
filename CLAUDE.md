@@ -66,18 +66,24 @@ shakeout. "Verify" the backend means: `npx ampx sandbox --once` deploys clean.
 
 - **UserProfile** — one per account (displayName, email, optional homeAirport). Owner
   has full CRUD; any authenticated user can *read* (so you can find family by email).
-- **Flight** — owned by one user; carries a cached AeroAPI live-status snapshot
-  (status, gates, terminals, scheduled/estimated/actual times, progress). Owner-only.
-  Has a denormalized `ownerEmail` so the refresh Lambda can resolve push recipients
-  without a join — the iOS create path must set it.
+- **Flight** — owned by one user; cached AeroAPI snapshot (status, gates, terminals,
+  times, progress). Owner auth is `ownerDefinedIn('ownerEmail')` (matched on the email
+  claim), so `ownerEmail` is **required** and doubles as the push-recipient key.
+  Cross-family read is granted by `viewers: [String]` via
+  `ownersDefinedIn('viewers').to(['read'])` — the list holds the owner + accepted
+  family emails.
 - **FamilyLink** — directed invite (inviterEmail → inviteeEmail) with status
   PENDING/ACCEPTED/DECLINED. When ACCEPTED, the app loads the counterparty's flights.
 - **DeviceToken** — one per device (ownerEmail, APNs token, snsEndpointArn, platform).
   Owner-writable; the app creates it, the refresh Lambda fills in `snsEndpointArn`
   lazily. GSI on `ownerEmail` (`deviceTokensByOwnerEmail`) for recipient lookup.
 
-Cross-family read visibility is currently enforced in the **app sync layer**, not the
-row-level auth rules — see "Hardening" below.
+**Cross-family read = the `viewers` list.** Each user maintains their OWN flights'
+viewers (owner auth prevents touching others'). `FamilyViewModel.reconcileMyViewers()`
+rewrites my flights' viewers to (me + my accepted family) on every family-screen load,
+and `FlightsViewModel.addFlight` sets it on create. Both sides converge regardless of
+who accepted when — this is the drift-mitigation for the per-row-list approach (Option A).
+`FlightRepository.refreshViewers` / `acceptedFamilyEmails` are the single source of truth.
 
 **Lambda ↔ data access:** the push Lambdas read/write model tables via **direct
 DynamoDB IAM grants** in `backend.ts` (not the data client). A function bound as an
@@ -112,5 +118,5 @@ creates a circular dependency between the data and function nested stacks.
 - [x] Cache AeroAPI by flightNumber+date (DynamoDB cache table + TTL).
 - [x] Scheduled `flight-refresh` Lambda + SNS push for status changes (off until
       `ENABLE_PUSH=true` + APNs key; see README "Push notifications").
-- [ ] Tighten cross-family `Flight` read access with a custom resolver/authorizer rather
-      than relying on the app sync layer.
+- [x] Cross-family `Flight` read access enforced at the row level via `viewers` +
+      `ownersDefinedIn` (was previously owner-only, which actually blocked sharing).

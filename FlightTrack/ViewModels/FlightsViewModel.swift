@@ -51,6 +51,12 @@ final class FlightsViewModel: ObservableObject {
             note: note?.isEmpty == true ? nil : note
         )
 
+        // Grant read access to the owner + any accepted family members.
+        if let ownerEmail {
+            let family = (try? await repo.acceptedFamilyEmails(for: ownerEmail)) ?? []
+            flight.viewers = ([ownerEmail.lowercased()] + family).uniqued()
+        }
+
         // Enrich with live data; tolerate failures so the flight can still be saved.
         do {
             let live = try await AeroAPIClient.shared.fetchFlight(ident: flight.flightNumber, near: date)

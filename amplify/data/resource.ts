@@ -52,9 +52,10 @@ const schema = a.schema({
     .model({
       profileId: a.id().required(),
       profile: a.belongsTo('UserProfile', 'profileId'),
-      // Denormalized owner email so the scheduled refresh Lambda can resolve
-      // notification recipients (owner + family) without a join.
-      ownerEmail: a.email(),
+      // Denormalized owner email. Doubles as the owner-auth identifier
+      // (ownerDefinedIn below) and lets the refresh Lambda resolve notification
+      // recipients without a join. Required so owner auth always resolves.
+      ownerEmail: a.email().required(),
 
       // Identity
       flightNumber: a.string().required(), // e.g. "UA328"
@@ -81,10 +82,19 @@ const schema = a.schema({
       lastRefreshedAt: a.datetime(),
 
       note: a.string(), // free-text, e.g. "Picking up Mom"
+
+      // Emails allowed to READ this flight: the owner plus any accepted family
+      // members. Maintained by the app on create and by the FamilyViewModel when
+      // links are accepted/removed. Drives cross-family read access below.
+      viewers: a.string().array(),
     })
-    // Owner CRUD. The scheduled refresh Lambda reads/updates flights via direct
-    // DynamoDB IAM access (granted in backend.ts), not the data client.
-    .authorization((allow) => [allow.owner()]),
+    .authorization((allow) => [
+      // Owner (matched by email) has full CRUD.
+      allow.ownerDefinedIn('ownerEmail').identityClaim('email'),
+      // Accepted family members listed in `viewers` may READ (incl. live
+      // subscriptions). Matched against the caller's Cognito email claim.
+      allow.ownersDefinedIn('viewers').identityClaim('email').to(['read']),
+    ]),
 
   FamilyLink: a
     .model({

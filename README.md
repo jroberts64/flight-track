@@ -182,5 +182,5 @@ To turn it on:
 - [x] Cache AeroAPI usage (flightNumber+date, DynamoDB TTL). ✅
 - [x] Scheduled refresh of upcoming flights + push on status changes. ✅
       (`flight-refresh` + SNS).
-- [ ] Tighten cross-family `Flight` read access with a custom resolver (currently enforced
-      in the app sync layer).
+- [x] Cross-family `Flight` read access enforced row-level via a `viewers` list +
+      `ownersDefinedIn` (owner + accepted family emails); maintained by the app.

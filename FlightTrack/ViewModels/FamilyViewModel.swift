@@ -12,9 +12,11 @@ final class FamilyViewModel: ObservableObject {
 
     private let repo = FlightRepository.shared
     private var myEmail: String = ""
+    private var myProfileId: String = ""
 
-    func start(myEmail: String) {
+    func start(myEmail: String, myProfileId: String) {
         self.myEmail = myEmail
+        self.myProfileId = myProfileId
         Task { await reload() }
     }
 
@@ -23,9 +25,28 @@ final class FamilyViewModel: ObservableObject {
         defer { isLoading = false }
         do {
             links = try await listMyLinks()
+            // Keep MY flights' viewers in sync with current accepted links. Each
+            // user maintains their own flights (owner auth), so reconciling on
+            // load is how both sides converge regardless of who accepted when.
+            await reconcileMyViewers()
             await loadAcceptedMemberFlights()
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    /// Rewrites the viewers on my own flights to (me + my accepted family).
+    private func reconcileMyViewers() async {
+        guard !myEmail.isEmpty, !myProfileId.isEmpty else { return }
+        let family = links
+            .filter { $0.status == .accepted }
+            .map { $0.counterparty(for: myEmail) }
+        do {
+            try await repo.refreshViewers(
+                ownerEmail: myEmail, profileId: myProfileId, familyEmails: family
+            )
+        } catch {
+            // Non-fatal: viewers will reconcile on a later load.
         }
     }
 

@@ -98,6 +98,7 @@ extension JSONValue {
             id: id,
             profileId: profileId,
             ownerEmail: value(at: "ownerEmail")?.stringValue,
+            viewers: value(at: "viewers")?.arrayValue?.compactMap { $0.stringValue },
             flightNumber: number,
             faFlightId: value(at: "faFlightId")?.stringValue,
             departureDate: depDate,
@@ -142,6 +143,7 @@ extension Flight {
         return [
             "profileId": profileId,
             "ownerEmail": ownerEmail,
+            "viewers": viewers,
             "flightNumber": flightNumber,
             "faFlightId": faFlightId,
             "departureDate": DateOnly.string(departureDate),

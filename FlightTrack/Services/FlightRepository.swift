@@ -2,6 +2,14 @@ import Foundation
 import Combine
 import Amplify
 
+extension Array where Element: Hashable {
+    /// Deduplicates while preserving first-seen order.
+    func uniqued() -> [Element] {
+        var seen = Set<Element>()
+        return filter { seen.insert($0).inserted }
+    }
+}
+
 /// Persistence + sync for flights, profiles, and family links.
 ///
 /// This uses the Amplify GraphQL API (AppSync). The GraphQL documents are written
@@ -117,11 +125,62 @@ final class FlightRepository: ObservableObject {
 
     // MARK: Family flights
 
-    /// Flights belonging to a family member (by their profileId). The backend's
-    /// owner rule means this only returns rows if cross-account read is granted;
-    /// see README "Hardening" for tightening this with a custom resolver.
+    /// Flights belonging to a family member (by their profileId). Access is
+    /// granted by the `viewers` list on each Flight (ownersDefinedIn), so this
+    /// returns rows only where the caller's email is an accepted viewer.
     func listFlights(forProfileId profileId: String) async throws -> [Flight] {
         try await listMyFlights(profileId: profileId)
+    }
+
+    // MARK: viewers maintenance (cross-family read access)
+
+    /// The emails of accepted family members for a user (the counterparties of
+    /// ACCEPTED FamilyLinks). Single source of truth for who may view my flights.
+    func acceptedFamilyEmails(for myEmail: String) async throws -> [String] {
+        let email = myEmail.lowercased()
+        let doc = """
+        query List($email: String!) {
+          listFamilyLinks(filter: {
+            or: [{ inviterEmail: { eq: $email } }, { inviteeEmail: { eq: $email } }]
+          }) {
+            items { inviterEmail inviteeEmail status }
+          }
+        }
+        """
+        let result: GraphQLResponse<JSONValue> = try await Amplify.API.query(
+            request: GraphQLRequest(document: doc, variables: ["email": email], responseType: JSONValue.self)
+        )
+        let items = try result.get().value(at: "listFamilyLinks.items")?.arrayValue ?? []
+        return items.compactMap { item -> String? in
+            guard item.value(at: "status")?.stringValue == "ACCEPTED" else { return nil }
+            let inviter = item.value(at: "inviterEmail")?.stringValue?.lowercased() ?? ""
+            let invitee = item.value(at: "inviteeEmail")?.stringValue?.lowercased() ?? ""
+            return inviter == email ? invitee : inviter
+        }.uniqued()
+    }
+
+    /// Sets the `viewers` list on a flight (owner + accepted family emails).
+    func setViewers(flightId: String, viewers: [String]) async throws {
+        let doc = """
+        mutation Update($input: UpdateFlightInput!) {
+          updateFlight(input: $input) { id }
+        }
+        """
+        let vars: [String: Any] = ["input": ["id": flightId, "viewers": viewers]]
+        _ = try await Amplify.API.mutate(
+            request: GraphQLRequest(document: doc, variables: vars, responseType: JSONValue.self)
+        )
+    }
+
+    /// Rewrites `viewers` on ALL of the owner's flights to `owner + family`.
+    /// Called when a family link is accepted/removed so existing flights pick up
+    /// the change. Centralized here to avoid drift.
+    func refreshViewers(ownerEmail: String, profileId: String, familyEmails: [String]) async throws {
+        let viewers = ([ownerEmail.lowercased()] + familyEmails.map { $0.lowercased() }).uniqued()
+        let mine = try await listMyFlights(profileId: profileId)
+        for flight in mine {
+            try await setViewers(flightId: flight.id, viewers: viewers)
+        }
     }
 
     // MARK: Real-time
