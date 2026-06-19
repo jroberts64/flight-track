@@ -95,15 +95,34 @@ query, and the Lambda caches results in DynamoDB to protect the AeroAPI budget.
 > family members watching one flight — share a single upstream call. Don't poll
 > aggressively; the cache is what keeps you inside the free credit.
 
-### 3. iOS app
+### 3. Email delivery (verification codes)
 
-```bash
-open FlightTrack.xcodeproj      # (generate via Xcode: File > New > Project, or see below)
-```
+By default Cognito sends sign-up/verification emails from its built-in sender
+(`no-reply@verificationemail.com`) — functional but **frequently flagged as spam**.
+For real use, send via Amazon SES from a domain you own:
 
-The Swift sources live in `FlightTrack/`. Create an Xcode project named `FlightTrack`,
-add the Amplify Swift package (https://github.com/aws-amplify/amplify-swift), add the
-`FlightTrack/` sources, drop in `amplify_outputs.json`, and run.
+1. **Verify a sender in SES** (us-east-1). Either:
+   - a **single email address** (quick, no DNS — good for testing your own signups), or
+   - a **domain** (`yourdomain.com`) — add the DKIM CNAME records SES gives you, plus
+     an SPF TXT record. Better deliverability; required for arbitrary recipients.
+2. **Request SES production access** — new SES accounts are in a *sandbox* that only
+   sends to pre-verified addresses. File the "production access" request in the SES
+   console (usually approved within a day). Skip only if you stay in sandbox for testing.
+3. **Point Cognito at it** — set the sender at deploy time and redeploy:
+   ```bash
+   export COGNITO_SENDER_EMAIL="no-reply@yourdomain.com"   # the verified identity
+   export COGNITO_SENDER_NAME="FlightTrack"                # optional
+   npx ampx sandbox          # (or pipeline-deploy with these in CI env)
+   ```
+   `amplify/auth/resource.ts` reads these and attaches an SES sender only when set;
+   unset = default Cognito sender, deploys unchanged.
+
+### 4. iOS app
+
+The Xcode project already exists at `FlightTrack.xcodeproj` (sources in `FlightTrack/`,
+Amplify package added, `amplify_outputs.json` in the source dir). See
+`FlightTrack/Config/SETUP.md` for build/run details. Open it and ⌘R, or build from the
+CLI per that doc. Requires the iOS 26.5 simulator runtime.
 
 ## Data model
 

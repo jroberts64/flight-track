@@ -43,6 +43,12 @@ final class AuthService: ObservableObject {
 
     func signUp(email: String, password: String, displayName: String) async {
         lastError = nil
+        // Validate the password locally first so the user gets a clear message
+        // instead of Cognito's opaque error.
+        if let problem = Self.passwordProblem(password) {
+            lastError = problem
+            return
+        }
         do {
             let options = AuthSignUpRequest.Options(userAttributes: [
                 AuthUserAttribute(.email, value: email),
@@ -57,7 +63,7 @@ final class AuthService: ObservableObject {
                 await signIn(email: email, password: password)
             }
         } catch {
-            lastError = error.localizedDescription
+            lastError = friendlyMessage(error)
         }
     }
 
@@ -67,7 +73,7 @@ final class AuthService: ObservableObject {
             _ = try await Amplify.Auth.confirmSignUp(for: email, confirmationCode: code)
             state = .signedOut // user must now sign in
         } catch {
-            lastError = error.localizedDescription
+            lastError = friendlyMessage(error)
         }
     }
 
@@ -81,12 +87,64 @@ final class AuthService: ObservableObject {
                 state = .confirming(email: email)
             }
         } catch {
-            lastError = error.localizedDescription
+            lastError = friendlyMessage(error)
         }
     }
 
     func signOut() async {
         _ = await Amplify.Auth.signOut()
         state = .signedOut
+    }
+}
+
+extension AuthService {
+    /// Cognito's default password policy (mirrors the user pool config). Used to
+    /// validate before calling Cognito so users get a clear, immediate message
+    /// instead of the opaque `AuthError error 1`.
+    static func passwordProblem(_ password: String) -> String? {
+        var unmet: [String] = []
+        if password.count < 8 { unmet.append("at least 8 characters") }
+        if !password.contains(where: \.isUppercase) { unmet.append("an uppercase letter") }
+        if !password.contains(where: \.isLowercase) { unmet.append("a lowercase letter") }
+        if !password.contains(where: \.isNumber) { unmet.append("a number") }
+        let symbols = CharacterSet(charactersIn: "^$*.[]{}()?\"!@#%&/\\,><':;|_~`+=- ")
+        if !password.unicodeScalars.contains(where: { symbols.contains($0) }) {
+            unmet.append("a symbol")
+        }
+        guard !unmet.isEmpty else { return nil }
+        return "Password needs " + unmet.joined(separator: ", ") + "."
+    }
+
+    /// Turns Amplify's terse AuthError into something a person can act on.
+    func friendlyMessage(_ error: Error) -> String {
+        guard let authError = error as? AuthError else { return error.localizedDescription }
+        switch authError {
+        case .validation:
+            return "Please check the form and try again."
+        case .service(let summary, _, let underlying):
+            let text = "\(summary) \(String(describing: underlying))".lowercased()
+            if text.contains("password") {
+                return Self.passwordProblem("")
+                    ?? "Password doesn't meet the requirements (8+ chars, upper, lower, number, symbol)."
+            }
+            if text.contains("usernameexists") || text.contains("already exists") {
+                return "An account with that email already exists. Try signing in."
+            }
+            if text.contains("usernotfound") || text.contains("notauthorized") {
+                return "Incorrect email or password."
+            }
+            if text.contains("codemismatch") {
+                return "That verification code isn't right. Check the email and retry."
+            }
+            if text.contains("expiredcode") {
+                return "That code has expired. Request a new one."
+            }
+            if text.contains("invalidparameter") && text.contains("email") {
+                return "That doesn't look like a valid email address."
+            }
+            return summary
+        default:
+            return authError.errorDescription
+        }
     }
 }

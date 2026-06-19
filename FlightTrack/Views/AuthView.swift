@@ -35,6 +35,19 @@ struct AuthView: View {
                             .textInputAutocapitalization(.never)
                         SecureField("Password", text: $password)
                             .textContentType(isSignUp ? .newPassword : .password)
+
+                        if isSignUp && !password.isEmpty {
+                            if let problem = AuthService.passwordProblem(password) {
+                                Label(problem, systemImage: "exclamationmark.circle")
+                                    .font(.footnote).foregroundStyle(.secondary)
+                            } else {
+                                Label("Password looks good", systemImage: "checkmark.circle.fill")
+                                    .font(.footnote).foregroundStyle(.green)
+                            }
+                        } else if isSignUp {
+                            Text("8+ characters with an uppercase letter, a number, and a symbol.")
+                                .font(.footnote).foregroundStyle(.secondary)
+                        }
                     }
 
                     Section {
