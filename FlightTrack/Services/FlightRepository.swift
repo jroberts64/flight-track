@@ -185,14 +185,22 @@ final class FlightRepository: ObservableObject {
 
     // MARK: Real-time
 
-    func subscribeToFlightChanges(profileId: String) -> AmplifyAsyncThrowingSequence<GraphQLSubscriptionEvent<JSONValue>> {
+    /// Owner-scoped subscription. With ownerDefinedIn('ownerEmail') auth, AppSync
+    /// requires the `ownerEmail` argument to equal the subscriber's email — it is
+    /// NOT a filter. Passing a profileId filter instead gets the connection
+    /// rejected (surfaces as GraphQLResponseError 0).
+    func subscribeToFlightChanges(ownerEmail: String) -> AmplifyAsyncThrowingSequence<GraphQLSubscriptionEvent<JSONValue>> {
         let doc = """
-        subscription OnChange($profileId: ID!) {
-          onUpdateFlight(filter: { profileId: { eq: $profileId } }) { \(Self.flightFields) }
+        subscription OnChange($ownerEmail: String!) {
+          onUpdateFlight(ownerEmail: $ownerEmail) { \(Self.flightFields) }
         }
         """
         return Amplify.API.subscribe(
-            request: GraphQLRequest(document: doc, variables: ["profileId": profileId], responseType: JSONValue.self)
+            request: GraphQLRequest(
+                document: doc,
+                variables: ["ownerEmail": ownerEmail.lowercased()],
+                responseType: JSONValue.self
+            )
         )
     }
 

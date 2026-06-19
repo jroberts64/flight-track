@@ -18,7 +18,7 @@ final class FlightsViewModel: ObservableObject {
         self.profileId = profileId
         self.ownerEmail = ownerEmail
         Task { await reload() }
-        subscribe(profileId: profileId)
+        subscribe(ownerEmail: ownerEmail)
     }
 
     func reload() async {
@@ -97,11 +97,11 @@ final class FlightsViewModel: ObservableObject {
         }
     }
 
-    private func subscribe(profileId: String) {
+    private func subscribe(ownerEmail: String) {
         subscriptionTask?.cancel()
         subscriptionTask = Task {
             do {
-                let sequence = repo.subscribeToFlightChanges(profileId: profileId)
+                let sequence = repo.subscribeToFlightChanges(ownerEmail: ownerEmail)
                 for try await event in sequence {
                     switch event {
                     case .data(let result):
