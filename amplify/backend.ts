@@ -82,6 +82,20 @@ flightTable.grantReadWriteData(backend.flightRefresh.resources.lambda);
 deviceTable.grantReadWriteData(backend.flightRefresh.resources.lambda);
 familyTable.grantReadData(backend.flightRefresh.resources.lambda);
 
+// grantReadWriteData covers the table ARN but NOT secondary indexes. The refresh
+// Lambda Queries the deviceTokensByOwnerEmail GSI to find recipients, which needs
+// dynamodb:Query on the table/.../index/* ARN. Grant it explicitly.
+backend.flightRefresh.resources.lambda.addToRolePolicy(
+  new iam.PolicyStatement({
+    actions: ['dynamodb:Query'],
+    resources: [
+      `${deviceTable.tableArn}/index/*`,
+      `${flightTable.tableArn}/index/*`,
+      `${familyTable.tableArn}/index/*`,
+    ],
+  })
+);
+
 // --- SNS push (provisioned only when ENABLE_PUSH=true at deploy time) ------
 // Push needs an Apple Developer account + an APNs auth key (.p8). Until you have
 // those, deploy WITHOUT push: the rest of the app works and DeviceToken rows are

@@ -173,7 +173,10 @@ async function recipientsFor(flight: Record<string, any>): Promise<string[]> {
           ExpressionAttributeValues: { ':e': email },
         })
       )
-      .catch(() => null);
+      .catch((err) => {
+        console.error(`device lookup failed for ${email}:`, err);
+        return null;
+      });
     for (const item of res?.Items ?? []) {
       const arn = await ensureEndpoint(item);
       if (arn) arns.push(arn);
