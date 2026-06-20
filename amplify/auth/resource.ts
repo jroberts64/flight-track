@@ -1,4 +1,5 @@
 import { defineAuth } from '@aws-amplify/backend';
+import { preTokenGeneration } from './pre-token-generation/resource';
 
 /**
  * Cognito auth for FlightTrack.
@@ -32,6 +33,11 @@ export const auth = defineAuth({
       mutable: true,
       required: false,
     },
+  },
+  // Inject `email` into the access token so AppSync owner/viewers rules
+  // (identityClaim('email')) resolve.
+  triggers: {
+    preTokenGeneration,
   },
   // Only attach a custom SES sender when configured; otherwise Cognito's
   // default sender is used and the backend still deploys cleanly.

@@ -8,6 +8,7 @@ import { auth } from './auth/resource';
 import { data } from './data/resource';
 import { aeroapiLookup } from './functions/aeroapi-lookup/resource';
 import { flightRefresh } from './functions/flight-refresh/resource';
+import { preTokenGeneration } from './auth/pre-token-generation/resource';
 
 /**
  * FlightTrack backend.
@@ -30,7 +31,24 @@ const backend = defineBackend({
   data,
   aeroapiLookup,
   flightRefresh,
+  preTokenGeneration,
 });
+
+// The pre-token-generation trigger must run as LAMBDA_VERSION_V2_0 to override
+// ACCESS-token claims (the default basic version can only touch the ID token).
+// Amplify wires the function ARN into LambdaConfig.PreTokenGeneration (V1 key);
+// re-point it to PreTokenGenerationConfig with LambdaVersion V2_0.
+{
+  const cfnUserPool = backend.auth.resources.cfnResources.cfnUserPool;
+  const triggerArn = backend.preTokenGeneration.resources.lambda.functionArn;
+  cfnUserPool.addPropertyOverride('LambdaConfig.PreTokenGenerationConfig', {
+    LambdaArn: triggerArn,
+    LambdaVersion: 'V2_0',
+  });
+  // Remove the V1 key so Cognito uses the V2 config (they are mutually exclusive
+  // for the same trigger).
+  cfnUserPool.addPropertyDeletionOverride('LambdaConfig.PreTokenGeneration');
+}
 
 // --- AeroAPI response cache ----------------------------------------------
 const cacheStack = backend.createStack('AeroApiCache');
