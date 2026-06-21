@@ -27,15 +27,15 @@ real-time family sync run on AWS Amplify Gen 2.
 | Path | Responsibility |
 |------|----------------|
 | `amplify/auth/resource.ts` | Cognito config (email sign-in). |
-| `amplify/data/resource.ts` | Data model + authorization: `UserProfile`, `Flight`, `FamilyLink`. Single source of truth for the backend schema. |
+| `amplify/data/resource.ts` | Data model + authorization: `UserProfile`, `Flight`, `Connection`. Single source of truth for the backend schema. |
 | `amplify/backend.ts` | Backend entrypoint: wires auth + data + the AeroAPI Lambda, and provisions the DynamoDB cache table (TTL) granted to the Lambda. |
 | `amplify/functions/aeroapi-lookup/` | Lambda that proxies FlightAware AeroAPI server-side (key as an Amplify secret) with a DynamoDB cache. Exposed as the `lookupFlight` AppSync query. Pinned to the **data** stack (`resourceGroupName: 'data'`) to avoid a circular dependency. |
 | `amplify/functions/flight-refresh/` | Scheduled (30m) Lambda. Refreshes near-window flights via AeroAPI, diffs, updates, and pushes change alerts via SNS. Creates SNS endpoints lazily. |
 | `FlightTrack/App/` | App entrypoint (`FlightTrackApp`), `AppDelegate` (APNs token via `@UIApplicationDelegateAdaptor`), `RootView` (auth gate + tabs), `SessionStore` (per-session identity + profile id; sets push owner email). |
-| `FlightTrack/Models/` | Domain models (`Flight`/`FlightStatus`, `UserProfile`/`FamilyLink`) + AeroAPI decodables. Decoupled from Amplify codegen on purpose. |
+| `FlightTrack/Models/` | Domain models (`Flight`/`FlightStatus`, `UserProfile`/`Connection`) + AeroAPI decodables. Decoupled from Amplify codegen on purpose. |
 | `FlightTrack/Services/` | `AmplifyBootstrap`, `AuthService` (Cognito), `FlightRepository` (GraphQL CRUD + real-time subscription), `AeroAPIClient` (calls the `lookupFlight` backend query — NOT FlightAware directly), `PushService` (APNs permission + writes a DeviceToken row), `JSONMapping` (JSONValue ↔ domain). |
-| `FlightTrack/ViewModels/` | `FlightsViewModel`, `FamilyViewModel`. |
-| `FlightTrack/Views/` | SwiftUI screens: auth, my-flights + add-flight, family, flight row. |
+| `FlightTrack/ViewModels/` | `FlightsViewModel`, `ConnectionsViewModel`. |
+| `FlightTrack/Views/` | SwiftUI screens: auth, my-flights + add-flight, connections, flight row. |
 | `FlightTrack/Config/` | `SETUP.md` (Xcode project creation + secret setup). |
 | `deploy/` | `github-oidc.yaml` (CI deploy role), `bootstrap-oidc.sh` (one-time role create). |
 | `.github/workflows/deploy-backend.yml` | CI: `ampx pipeline-deploy` on push to main via OIDC. |
@@ -65,25 +65,28 @@ shakeout. "Verify" the backend means: `npx ampx sandbox --once` deploys clean.
 ## Data model + authorization
 
 - **UserProfile** — one per account (displayName, email, optional homeAirport). Owner
-  has full CRUD; any authenticated user can *read* (so you can find family by email).
+  has full CRUD; any authenticated user can *read* (so you can find people by email).
 - **Flight** — owned by one user; cached AeroAPI snapshot (status, gates, terminals,
   times, progress). Owner auth is `ownerDefinedIn('ownerEmail')` (matched on the email
   claim), so `ownerEmail` is **required** and doubles as the push-recipient key.
-  Cross-family read is granted by `viewers: [String]` via
+  Cross-account read is granted by `viewers: [String]` via
   `ownersDefinedIn('viewers').to(['read'])` — the list holds the owner + accepted
-  family emails.
-- **FamilyLink** — directed invite (inviterEmail → inviteeEmail) with status
-  PENDING/ACCEPTED/DECLINED. When ACCEPTED, the app loads the counterparty's flights.
+  connection emails.
+- **Connection** — directed invite (inviterEmail → inviteeEmail) with status
+  PENDING/ACCEPTED/DECLINED, between two accounts (family or friend). When ACCEPTED,
+  the app loads the counterparty's flights. (Renamed from `FamilyLink`.)
 - **DeviceToken** — one per device (ownerEmail, APNs token, snsEndpointArn, platform).
   Owner-writable; the app creates it, the refresh Lambda fills in `snsEndpointArn`
   lazily. GSI on `ownerEmail` (`deviceTokensByOwnerEmail`) for recipient lookup.
 
-**Cross-family read = the `viewers` list.** Each user maintains their OWN flights'
-viewers (owner auth prevents touching others'). `FamilyViewModel.reconcileMyViewers()`
-rewrites my flights' viewers to (me + my accepted family) on every family-screen load,
-and `FlightsViewModel.addFlight` sets it on create. Both sides converge regardless of
+**Cross-account read = the `viewers` list.** Each user maintains their OWN flights'
+viewers (owner auth prevents touching others'). `ConnectionsViewModel.reconcileMyViewers()`
+rewrites my flights' viewers to (me + my accepted connections) on every connections-screen
+load, and `FlightsViewModel.addFlight` sets it on create. Both sides converge regardless of
 who accepted when — this is the drift-mitigation for the per-row-list approach (Option A).
-`FlightRepository.refreshViewers` / `acceptedFamilyEmails` are the single source of truth.
+`FlightRepository.refreshViewers` / `acceptedConnectionEmails` are the single source of truth.
+NOTE: cross-account visibility requires the flight OWNER to run reconcile (open the
+Connections screen) after acceptance — see memory `family-sharing-verified`.
 
 **Lambda ↔ data access:** the push Lambdas read/write model tables via **direct
 DynamoDB IAM grants** in `backend.ts` (not the data client). A function bound as an
@@ -97,7 +100,7 @@ creates a circular dependency between the data and function nested stacks.
 - Swift domain models are deliberately separate from Amplify's generated types — views
   and view models depend only on `FlightTrack/Models`, and `JSONMapping.swift` bridges
   to GraphQL. Keep that boundary.
-- GraphQL documents in `FlightRepository`/`FamilyViewModel` are hand-written so the app
+- GraphQL documents in `FlightRepository`/`ConnectionsViewModel` are hand-written so the app
   compiles before codegen runs. The shared flight field set lives in
   `FlightRepository.flightFields` — update it in one place.
 - `@MainActor` on services/view models that publish to the UI; async work via
@@ -118,5 +121,5 @@ creates a circular dependency between the data and function nested stacks.
 - [x] Cache AeroAPI by flightNumber+date (DynamoDB cache table + TTL).
 - [x] Scheduled `flight-refresh` Lambda + SNS push for status changes (off until
       `ENABLE_PUSH=true` + APNs key; see README "Push notifications").
-- [x] Cross-family `Flight` read access enforced at the row level via `viewers` +
+- [x] Cross-account `Flight` read access enforced at the row level via `viewers` +
       `ownersDefinedIn` (was previously owner-only, which actually blocked sharing).

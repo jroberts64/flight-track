@@ -138,6 +138,29 @@ extension Flight {
         return dict.compactMapValues { $0 }
     }
 
+    /// Variables for the custom `publishFlightUpdate` mutation: id + the mutable
+    /// live-status fields, as individual arguments (not an input object). Nils
+    /// are dropped so the resolver does a partial update.
+    var publishUpdateVars: [String: Any] {
+        let iso = ISO8601DateFormatter.flexible
+        let vars: [String: Any?] = [
+            "id": id,
+            "status": status.rawValue,
+            "estimatedOut": estimatedOut.map(iso.string),
+            "estimatedIn": estimatedIn.map(iso.string),
+            "actualOut": actualOut.map(iso.string),
+            "actualIn": actualIn.map(iso.string),
+            "originGate": originGate,
+            "destinationGate": destinationGate,
+            "originTerminal": originTerminal,
+            "destinationTerminal": destinationTerminal,
+            "progressPercent": progressPercent,
+            "lastRefreshedAt": lastRefreshedAt.map(iso.string),
+            "note": note,
+        ]
+        return vars.compactMapValues { $0 }
+    }
+
     private var baseInput: [String: Any?] {
         let iso = ISO8601DateFormatter.flexible
         return [

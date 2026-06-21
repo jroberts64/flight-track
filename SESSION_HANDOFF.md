@@ -25,8 +25,12 @@ profile creation, flight persistence, and push all confirmed live.
 - **Push:** enabled. APNs `.p8` key + env in `~/.apple-developer/` (key id `L5TS25Z2T5`,
   team `V65ZGC2KRW`). `~/.apple-developer/flighttrack.env` holds the deploy vars
   (`ENABLE_PUSH=true`, `APNS_SANDBOX=true`, etc.).
-- **Email:** Cognito currently uses its DEFAULT sender (spam-prone) — the custom SES
-  sender is NOT wired in (see cleanup #1). SES production access was APPROVED.
+- **Email:** Cognito now sends via the custom SES sender
+  `FlightTrack <no-reply@jack-roberts.com>` (`EmailSendingAccount: DEVELOPER`), wired in
+  2026-06-20. SES production access was APPROVED. The from-address needed explicit
+  address-level verification (DKIM alone was NOT enough — Cognito checks SES
+  `VerificationStatus`); the verification email is reachable via a WorkMail alias of
+  `no-reply@` on the `jack@jack-roberts.com` user. (Details in `amplify-gotchas.md`.)
 
 ## How to operate (key commands)
 ```bash
@@ -34,10 +38,11 @@ profile creation, flight persistence, and push all confirmed live.
 aws sso login --sso-session personal-sso
 export AWS_PROFILE=personal-sso
 
-# Deploy backend (source the APNs env so push stays provisioned; do NOT set
-# COGNITO_SENDER_EMAIL yet — it wedges the stack, see cleanup #1):
+# Deploy backend (source the APNs env so push stays provisioned; set the SES sender so
+# Cognito keeps the custom from-address — its identity is verified, deploys clean now):
 source ~/.apple-developer/flighttrack.env
-unset COGNITO_SENDER_EMAIL COGNITO_SENDER_NAME
+export COGNITO_SENDER_EMAIL="no-reply@jack-roberts.com"
+export COGNITO_SENDER_NAME="FlightTrack"
 AWS_PROFILE=personal-sso npx ampx sandbox --once
 
 # IMPORTANT after every deploy: ampx writes amplify_outputs.json to the REPO ROOT,
@@ -58,11 +63,11 @@ Pool/client IDs change on every delete+redeploy; read them from
 `FlightTrack/amplify_outputs.json`.
 
 ## Cleanup owed (small, non-blocking)
-1. **Re-add custom SES sender.** `no-reply@jack-roberts.com` IS now a verified SES email
-   identity. Deploy with `COGNITO_SENDER_EMAIL="no-reply@jack-roberts.com"` set —
-   SEPARATELY, so if it wedges the auth stack it doesn't block other work. Cognito needs
-   the exact from-address as its own verified identity (a verified domain alone is NOT
-   enough — this caused repeated UPDATE_ROLLBACK_FAILED last session).
+1. ~~**Re-add custom SES sender.**~~ ✅ DONE 2026-06-20. Cognito now sends as
+   `FlightTrack <no-reply@jack-roberts.com>`. The address needed explicit SES
+   `VerificationStatus: SUCCESS` (DKIM was NOT enough — Cognito rejected it and rolled
+   back cleanly); verified via the click-link sent to a WorkMail alias of `no-reply@` on
+   the `jack@jack-roberts.com` user. Keep `COGNITO_SENDER_EMAIL` set on deploys now.
 2. **Change the debug password** off `DebugTest9$x`.
 3. **Revert test tweak:** I manually cleared flight DL5435's `originGate` + set a fake
    `scheduledOut` to force the test push. A real refresh corrects it; or restore cleanly.

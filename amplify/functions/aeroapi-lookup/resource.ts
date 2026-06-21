@@ -8,7 +8,7 @@ import { defineFunction, secret } from '@aws-amplify/backend';
  *     an Amplify secret (`AERO_API_KEY`) and injected into the Lambda env only.
  *  2. BUDGET — the AeroAPI Personal tier gives ~$5/month (~100 status queries).
  *     This function caches results in DynamoDB keyed by flightNumber+date so
- *     repeated lookups (e.g. several family members watching one flight, or a
+ *     repeated lookups (e.g. several people watching one flight, or a
  *     client polling) share a single upstream call within the cache window.
  *
  * Set the secret once per environment:

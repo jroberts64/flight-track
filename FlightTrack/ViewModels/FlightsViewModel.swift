@@ -13,12 +13,26 @@ final class FlightsViewModel: ObservableObject {
     private var profileId: String?
     private var ownerEmail: String?
     private var subscriptionTask: Task<Void, Never>?
+    private var pushObserver: NSObjectProtocol?
 
     func start(profileId: String, ownerEmail: String) {
         self.profileId = profileId
         self.ownerEmail = ownerEmail
         Task { await reload() }
         subscribe(ownerEmail: ownerEmail)
+        observePush()
+    }
+
+    /// A flight-change push means the backend already persisted new data — reload
+    /// so the UI reflects it without waiting for the (unreliable) subscription or
+    /// a manual pull-to-refresh.
+    private func observePush() {
+        guard pushObserver == nil else { return }
+        pushObserver = NotificationCenter.default.addObserver(
+            forName: .flightPushReceived, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in await self?.reload() }
+        }
     }
 
     func reload() async {
@@ -51,10 +65,10 @@ final class FlightsViewModel: ObservableObject {
             note: note?.isEmpty == true ? nil : note
         )
 
-        // Grant read access to the owner + any accepted family members.
+        // Grant read access to the owner + any accepted connections.
         if let ownerEmail {
-            let family = (try? await repo.acceptedFamilyEmails(for: ownerEmail)) ?? []
-            flight.viewers = ([ownerEmail.lowercased()] + family).uniqued()
+            let connections = (try? await repo.acceptedConnectionEmails(for: ownerEmail)) ?? []
+            flight.viewers = ([ownerEmail.lowercased()] + connections).uniqued()
         }
 
         // Enrich with live data; tolerate failures so the flight can still be saved.
@@ -123,5 +137,8 @@ final class FlightsViewModel: ObservableObject {
         }
     }
 
-    deinit { subscriptionTask?.cancel() }
+    deinit {
+        subscriptionTask?.cancel()
+        if let pushObserver { NotificationCenter.default.removeObserver(pushObserver) }
+    }
 }
