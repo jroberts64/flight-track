@@ -8,7 +8,7 @@ struct Flight: Identifiable, Hashable, Codable {
     /// Denormalized owner email — owner-auth identifier + lets the backend
     /// refresh/notify without a join.
     var ownerEmail: String?
-    /// Emails allowed to read this flight: owner + accepted family members.
+    /// Emails allowed to read this flight: owner + accepted connections.
     var viewers: [String]?
 
     var flightNumber: String

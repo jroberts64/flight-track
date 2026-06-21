@@ -30,8 +30,8 @@ struct MainTabView: View {
         TabView {
             MyFlightsView()
                 .tabItem { Label("My Flights", systemImage: "airplane") }
-            FamilyView()
-                .tabItem { Label("Family", systemImage: "person.2") }
+            ConnectionsView()
+                .tabItem { Label("Connections", systemImage: "person.2") }
             SettingsView()
                 .tabItem { Label("Settings", systemImage: "gear") }
         }

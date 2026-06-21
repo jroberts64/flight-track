@@ -13,9 +13,9 @@ enum LinkStatus: String, Codable {
     case declined = "DECLINED"
 }
 
-/// A connection between two accounts. When `status == .accepted` the two
-/// users may view each other's flights.
-struct FamilyLink: Identifiable, Hashable, Codable {
+/// A connection between two accounts (family or friend). When
+/// `status == .accepted` the two users may view each other's flights.
+struct Connection: Identifiable, Hashable, Codable {
     var id: String
     var inviterEmail: String
     var inviteeEmail: String

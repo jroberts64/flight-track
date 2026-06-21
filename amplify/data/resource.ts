@@ -1,5 +1,6 @@
 import { type ClientSchema, a, defineData } from '@aws-amplify/backend';
 import { aeroapiLookup } from '../functions/aeroapi-lookup/resource';
+import { flightRefresh } from '../functions/flight-refresh/resource';
 
 /**
  * FlightTrack data model.
@@ -7,15 +8,15 @@ import { aeroapiLookup } from '../functions/aeroapi-lookup/resource';
  * Three models:
  *  - UserProfile: public-ish identity per account (name, home airport).
  *  - Flight:      a flight owned by one user, with a cached live-status snapshot.
- *  - FamilyLink:  a directed connection between two accounts. When status is
- *                 ACCEPTED, the two users may read each other's flights.
+ *  - Connection:  a directed link between two accounts (family or friend). When
+ *                 status is ACCEPTED, the two users may read each other's flights.
  *
- * Authorization model (kept deliberately simple for a family-scale app):
+ * Authorization model (kept deliberately simple for a small-group app):
  *  - Owners have full CRUD over their own Flights and UserProfile.
- *  - Authenticated users can read UserProfiles (so you can find family by name/email).
- *  - Flights are owner-private at the row level. Cross-family READ visibility is
+ *  - Authenticated users can read UserProfiles (so you can find people by name/email).
+ *  - Flights are owner-private at the row level. Cross-account READ visibility is
  *    enforced in the app's sync layer by querying flights of users you have an
- *    ACCEPTED FamilyLink with. (See "Hardening" in README for moving this into a
+ *    ACCEPTED Connection with. (See "Hardening" in README for moving this into a
  *    custom authorizer / resolver for defense-in-depth.)
  */
 const schema = a.schema({
@@ -44,7 +45,7 @@ const schema = a.schema({
     })
     .authorization((allow) => [
       allow.owner(),
-      // Other signed-in users can read profiles to find/invite family.
+      // Other signed-in users can read profiles to find/invite connections.
       allow.authenticated().to(['read']),
     ]),
 
@@ -83,20 +84,25 @@ const schema = a.schema({
 
       note: a.string(), // free-text, e.g. "Picking up Mom"
 
-      // Emails allowed to READ this flight: the owner plus any accepted family
-      // members. Maintained by the app on create and by the FamilyViewModel when
-      // links are accepted/removed. Drives cross-family read access below.
+      // Emails allowed to READ this flight: the owner plus any accepted
+      // connections. Maintained by the app on create and by the
+      // ConnectionsViewModel when links are accepted/removed. Drives
+      // cross-account read access below.
       viewers: a.string().array(),
     })
     .authorization((allow) => [
       // Owner (matched by email) has full CRUD.
       allow.ownerDefinedIn('ownerEmail').identityClaim('email'),
-      // Accepted family members listed in `viewers` may READ (incl. live
-      // subscriptions). Matched against the caller's Cognito email claim.
+      // Accepted connections listed in `viewers` may READ on queries. NOTE:
+      // this does NOT grant real-time delivery — Amplify's generated
+      // onUpdateFlight subscription authorizes on the OWNER identity only, so a
+      // viewer cannot receive another user's flight changes through it. Live
+      // cross-account updates are delivered by the custom
+      // `onConnectionFlightChange` subscription below instead.
       allow.ownersDefinedIn('viewers').identityClaim('email').to(['read']),
     ]),
 
-  FamilyLink: a
+  Connection: a
     .model({
       // The inviter (owner) and the invitee (by email, resolved to a user).
       inviterEmail: a.email().required(),
@@ -131,6 +137,63 @@ const schema = a.schema({
     // backend.ts), then writes the ARN back.
     .authorization((allow) => [allow.owner()]),
 
+  // Custom flight-update mutation. Amplify's generated `updateFlight` cannot
+  // drive a viewer-aware live subscription (its onUpdateFlight delivers to the
+  // OWNER only — verified empirically). So all flight writes go through this
+  // custom mutation instead: its JS resolver writes the Flight row directly
+  // (partial update — only provided fields), and the `onConnectionFlightChange`
+  // subscription is bound to THIS mutation, so any viewer of the row gets the
+  // change live. Authorized to any authenticated caller; the resolver enforces
+  // that only the owner OR a listed viewer may write (defense kept simple for a
+  // small-group app — the app only ever sends owner-initiated writes).
+  publishFlightUpdate: a
+    .mutation()
+    .arguments({
+      id: a.id().required(),
+      status: a.string(),
+      estimatedOut: a.string(),
+      estimatedIn: a.string(),
+      actualOut: a.string(),
+      actualIn: a.string(),
+      originGate: a.string(),
+      destinationGate: a.string(),
+      originTerminal: a.string(),
+      destinationTerminal: a.string(),
+      progressPercent: a.integer(),
+      lastRefreshedAt: a.string(),
+      note: a.string(),
+      viewers: a.string().array(),
+    })
+    .returns(a.ref('Flight'))
+    // Authenticated users (the app via Cognito) may call it. The refresh Lambda
+    // calls it too, via IAM — granted appsync:GraphQL on this field in
+    // backend.ts, with IAM added as an auth mode there.
+    .authorization((allow) => [allow.authenticated()])
+    .handler(
+      a.handler.custom({
+        dataSource: a.ref('Flight'),
+        entry: './publish-flight-update.js',
+      })
+    ),
+
+  // Live cross-account flight updates. Bound to `publishFlightUpdate` above (a
+  // custom subscription CAN attach to a custom mutation; it could not reliably
+  // attach to the generated updateFlight). The subscriber passes their own
+  // email; the resolver installs a filter so the event is delivered only when
+  // that email is in the mutated flight's `viewers`. The app opens this with
+  // viewerEmail = me, giving live updates for my flights AND my connections'.
+  onConnectionFlightChange: a
+    .subscription()
+    .for(a.ref('publishFlightUpdate'))
+    .arguments({ viewerEmail: a.string().required() })
+    .returns(a.ref('Flight'))
+    .authorization((allow) => [allow.authenticated()])
+    .handler(
+      a.handler.custom({
+        entry: './on-connection-flight-change.js',
+      })
+    ),
+
   // Normalized result of a server-side AeroAPI lookup (see functions/aeroapi-lookup).
   FlightLookupResult: a.customType({
     flightNumber: a.string().required(),
@@ -160,7 +223,12 @@ const schema = a.schema({
     .returns(a.ref('FlightLookupResult'))
     .authorization((allow) => [allow.authenticated()])
     .handler(a.handler.function(aeroapiLookup)),
-});
+})
+  // The scheduled refresh Lambda calls `publishFlightUpdate` via IAM so its
+  // writes flow through AppSync and fire the live subscription. Function access
+  // is configured at the schema level (not per-field). This adds IAM as an auth
+  // mode automatically.
+  .authorization((allow) => [allow.resource(flightRefresh).to(['mutate'])]);
 
 export type Schema = ClientSchema<typeof schema>;
 

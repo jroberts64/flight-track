@@ -66,21 +66,21 @@ backend.aeroapiLookup.addEnvironment('CACHE_TABLE_NAME', cacheTable.tableName);
 const tables = backend.data.resources.tables;
 const flightTable = tables['Flight'];
 const deviceTable = tables['DeviceToken'];
-const familyTable = tables['FamilyLink'];
+const connectionTable = tables['Connection'];
 
 // The GSI name Amplify generates for DeviceToken.ownerEmail secondary index.
 const DEVICE_BY_EMAIL_GSI = 'deviceTokensByOwnerEmail';
 
 backend.flightRefresh.addEnvironment('FLIGHT_TABLE', flightTable.tableName);
 backend.flightRefresh.addEnvironment('DEVICE_TOKEN_TABLE', deviceTable.tableName);
-backend.flightRefresh.addEnvironment('FAMILY_LINK_TABLE', familyTable.tableName);
+backend.flightRefresh.addEnvironment('CONNECTION_TABLE', connectionTable.tableName);
 backend.flightRefresh.addEnvironment('DEVICE_TOKEN_BY_EMAIL', DEVICE_BY_EMAIL_GSI);
 
 // Direct table access for the scheduled job. It reads/writes DeviceToken too,
 // because it lazily creates SNS endpoints and writes the ARN back.
 flightTable.grantReadWriteData(backend.flightRefresh.resources.lambda);
 deviceTable.grantReadWriteData(backend.flightRefresh.resources.lambda);
-familyTable.grantReadData(backend.flightRefresh.resources.lambda);
+connectionTable.grantReadData(backend.flightRefresh.resources.lambda);
 
 // grantReadWriteData covers the table ARN but NOT secondary indexes. The refresh
 // Lambda Queries the deviceTokensByOwnerEmail GSI to find recipients, which needs
@@ -91,7 +91,7 @@ backend.flightRefresh.resources.lambda.addToRolePolicy(
     resources: [
       `${deviceTable.tableArn}/index/*`,
       `${flightTable.tableArn}/index/*`,
-      `${familyTable.tableArn}/index/*`,
+      `${connectionTable.tableArn}/index/*`,
     ],
   })
 );

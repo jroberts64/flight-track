@@ -39,8 +39,14 @@ struct FlightRowView: View {
     private func timeColumn(label: String, date: Date?, gate: String?, terminal: String?, alignment: HorizontalAlignment = .leading) -> some View {
         VStack(alignment: alignment, spacing: 2) {
             Text(label).font(.caption2).foregroundStyle(.secondary)
-            Text(date.map { $0.formatted(date: .omitted, time: .shortened) } ?? "—")
-                .font(.subheadline).monospacedDigit()
+            if let date {
+                Text(date.formatted(.dateTime.month(.abbreviated).day()))
+                    .font(.caption2).foregroundStyle(.secondary)
+                Text(date.formatted(date: .omitted, time: .shortened))
+                    .font(.subheadline).monospacedDigit()
+            } else {
+                Text("—").font(.subheadline).monospacedDigit()
+            }
             if gate != nil || terminal != nil {
                 Text([terminal.map { "T\($0)" }, gate.map { "Gate \($0)" }].compactMap { $0 }.joined(separator: " · "))
                     .font(.caption2).foregroundStyle(.secondary)

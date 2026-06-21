@@ -2,10 +2,10 @@ import Foundation
 import Combine
 import Amplify
 
-/// Manages family links (invitations) and loading family members' flights.
+/// Manages connections (invitations) and loading connected users' flights.
 @MainActor
-final class FamilyViewModel: ObservableObject {
-    @Published var links: [FamilyLink] = []
+final class ConnectionsViewModel: ObservableObject {
+    @Published var links: [Connection] = []
     @Published var memberFlights: [String: [Flight]] = [:] // keyed by counterparty email
     @Published var errorMessage: String?
     @Published var isLoading = false
@@ -13,20 +13,56 @@ final class FamilyViewModel: ObservableObject {
     private let repo = FlightRepository.shared
     private var myEmail: String = ""
     private var myProfileId: String = ""
+    private var subscriptionTask: Task<Void, Never>?
 
     func start(myEmail: String, myProfileId: String) {
         self.myEmail = myEmail
         self.myProfileId = myProfileId
         Task { await reload() }
+        subscribeToConnectionFlights()
     }
+
+    /// Live updates for connections' flights via the viewer-scoped subscription.
+    /// On each change, replace the matching flight in the right counterparty's
+    /// bucket (keyed by the flight's ownerEmail).
+    private func subscribeToConnectionFlights() {
+        subscriptionTask?.cancel()
+        let viewer = myEmail
+        subscriptionTask = Task {
+            do {
+                let sequence = repo.subscribeToConnectionFlightChanges(viewerEmail: viewer)
+                for try await event in sequence {
+                    guard case .data(let result) = event,
+                          let json = try? result.get(),
+                          let updated = json.value(at: "onConnectionFlightChange")?.asFlight
+                    else { continue }
+                    // Ignore my own flights here (My Flights handles those); only
+                    // reflect connections' flights in the Connections screen.
+                    let owner = (updated.ownerEmail ?? "").lowercased()
+                    guard owner != myEmail.lowercased() else { continue }
+                    var bucket = memberFlights[owner] ?? []
+                    if let idx = bucket.firstIndex(where: { $0.id == updated.id }) {
+                        bucket[idx] = updated
+                    } else {
+                        bucket.append(updated)
+                    }
+                    memberFlights[owner] = bucket
+                }
+            } catch {
+                // Subscriptions can drop; screen still works via reload.
+            }
+        }
+    }
+
+    deinit { subscriptionTask?.cancel() }
 
     func reload() async {
         isLoading = true
         defer { isLoading = false }
         do {
             links = try await listMyLinks()
-            // Keep MY flights' viewers in sync with current accepted links. Each
-            // user maintains their own flights (owner auth), so reconciling on
+            // Keep MY flights' viewers in sync with current accepted connections.
+            // Each user maintains their own flights (owner auth), so reconciling on
             // load is how both sides converge regardless of who accepted when.
             await reconcileMyViewers()
             await loadAcceptedMemberFlights()
@@ -35,38 +71,38 @@ final class FamilyViewModel: ObservableObject {
         }
     }
 
-    /// Rewrites the viewers on my own flights to (me + my accepted family).
+    /// Rewrites the viewers on my own flights to (me + my accepted connections).
     private func reconcileMyViewers() async {
         guard !myEmail.isEmpty, !myProfileId.isEmpty else { return }
-        let family = links
+        let connections = links
             .filter { $0.status == .accepted }
             .map { $0.counterparty(for: myEmail) }
         do {
             try await repo.refreshViewers(
-                ownerEmail: myEmail, profileId: myProfileId, familyEmails: family
+                ownerEmail: myEmail, profileId: myProfileId, connectionEmails: connections
             )
         } catch {
             // Non-fatal: viewers will reconcile on a later load.
         }
     }
 
-    var pendingInvitesForMe: [FamilyLink] {
+    var pendingInvitesForMe: [Connection] {
         links.filter { $0.status == .pending && $0.isInvitee(myEmail) }
     }
 
-    var connected: [FamilyLink] {
+    var connected: [Connection] {
         links.filter { $0.status == .accepted }
     }
 
     func invite(email: String) async {
         let target = email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !target.isEmpty, target != myEmail.lowercased() else {
-            errorMessage = "Enter a valid family member email (not your own)."
+            errorMessage = "Enter a valid email (not your own)."
             return
         }
         let doc = """
-        mutation Create($input: CreateFamilyLinkInput!) {
-          createFamilyLink(input: $input) { id inviterEmail inviteeEmail status }
+        mutation Create($input: CreateConnectionInput!) {
+          createConnection(input: $input) { id inviterEmail inviteeEmail status }
         }
         """
         let vars: [String: Any] = [
@@ -86,10 +122,10 @@ final class FamilyViewModel: ObservableObject {
         }
     }
 
-    func respond(to link: FamilyLink, accept: Bool) async {
+    func respond(to link: Connection, accept: Bool) async {
         let doc = """
-        mutation Update($input: UpdateFamilyLinkInput!) {
-          updateFamilyLink(input: $input) { id status }
+        mutation Update($input: UpdateConnectionInput!) {
+          updateConnection(input: $input) { id status }
         }
         """
         let vars: [String: Any] = [
@@ -105,10 +141,10 @@ final class FamilyViewModel: ObservableObject {
         }
     }
 
-    private func listMyLinks() async throws -> [FamilyLink] {
+    private func listMyLinks() async throws -> [Connection] {
         let doc = """
         query List($email: String!) {
-          listFamilyLinks(filter: {
+          listConnections(filter: {
             or: [{ inviterEmail: { eq: $email } }, { inviteeEmail: { eq: $email } }]
           }) {
             items { id inviterEmail inviteeEmail status }
@@ -118,13 +154,13 @@ final class FamilyViewModel: ObservableObject {
         let result: GraphQLResponse<JSONValue> = try await Amplify.API.query(
             request: GQL.userPool(doc, variables: ["email": myEmail.lowercased()])
         )
-        let items = try result.get().value(at: "listFamilyLinks.items")?.arrayValue ?? []
-        return items.compactMap { item -> FamilyLink? in
+        let items = try result.get().value(at: "listConnections.items")?.arrayValue ?? []
+        return items.compactMap { item -> Connection? in
             guard let id = item.value(at: "id")?.stringValue,
                   let inviter = item.value(at: "inviterEmail")?.stringValue,
                   let invitee = item.value(at: "inviteeEmail")?.stringValue else { return nil }
             let status = LinkStatus(rawValue: item.value(at: "status")?.stringValue ?? "PENDING") ?? .pending
-            return FamilyLink(id: id, inviterEmail: inviter, inviteeEmail: invitee, status: status)
+            return Connection(id: id, inviterEmail: inviter, inviteeEmail: invitee, status: status)
         }
     }
 

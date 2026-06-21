@@ -3,7 +3,7 @@ import { preTokenGeneration } from './pre-token-generation/resource';
 
 /**
  * Cognito auth for FlightTrack.
- * Users sign in with email. A verified email is required so that family
+ * Users sign in with email. A verified email is required so that connection
  * invitations can be addressed by email address.
  *
  * Email delivery:
@@ -28,7 +28,7 @@ export const auth = defineAuth({
     email: true,
   },
   userAttributes: {
-    // Shown to family members instead of a raw user id.
+    // Shown to connections instead of a raw user id.
     preferredUsername: {
       mutable: true,
       required: false,

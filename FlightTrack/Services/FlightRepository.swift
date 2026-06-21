@@ -10,7 +10,7 @@ extension Array where Element: Hashable {
     }
 }
 
-/// Persistence + sync for flights, profiles, and family links.
+/// Persistence + sync for flights, profiles, and connections.
 ///
 /// This uses the Amplify GraphQL API (AppSync). The GraphQL documents are written
 /// by hand so the file compiles before codegen runs; once you run `ampx sandbox`
@@ -18,7 +18,7 @@ extension Array where Element: Hashable {
 /// `Amplify.API.query(request: .list(Flight.self))` style if you prefer.
 ///
 /// Real-time: `subscribeToMyFlights` opens an AppSync subscription so the UI
-/// updates live when a flight changes (including changes a family member can see).
+/// updates live when a flight changes (including changes a connection can see).
 @MainActor
 final class FlightRepository: ObservableObject {
     static let shared = FlightRepository()
@@ -119,14 +119,32 @@ final class FlightRepository: ObservableObject {
         return created
     }
 
+    /// Persists flight changes via the custom `publishFlightUpdate` mutation
+    /// (NOT the generated `updateFlight`), so the viewer-aware
+    /// `onConnectionFlightChange` subscription fires for connections. Sends only
+    /// the mutable live-status fields; the resolver does a partial update.
     func updateFlight(_ flight: Flight) async throws {
         let doc = """
-        mutation Update($input: UpdateFlightInput!) {
-          updateFlight(input: $input) { id }
+        mutation Publish(
+          $id: ID!, $status: String, $estimatedOut: String, $estimatedIn: String,
+          $actualOut: String, $actualIn: String, $originGate: String,
+          $destinationGate: String, $originTerminal: String, $destinationTerminal: String,
+          $progressPercent: Int, $lastRefreshedAt: String, $note: String
+        ) {
+          publishFlightUpdate(
+            id: $id, status: $status, estimatedOut: $estimatedOut, estimatedIn: $estimatedIn,
+            actualOut: $actualOut, actualIn: $actualIn, originGate: $originGate,
+            destinationGate: $destinationGate, originTerminal: $originTerminal,
+            destinationTerminal: $destinationTerminal, progressPercent: $progressPercent,
+            lastRefreshedAt: $lastRefreshedAt, note: $note
+          ) { \(Self.flightFields) }
         }
         """
+        // NOTE: must select the full field set (incl. `viewers`) so the
+        // onConnectionFlightChange subscription's viewers-filter has fields to
+        // match against — otherwise it silently won't fire for connections.
         _ = try await Amplify.API.mutate(
-            request: GQL.userPool(doc, variables: ["input": flight.updateInput])
+            request: GQL.userPool(doc, variables: flight.publishUpdateVars)
         )
     }
 
@@ -141,24 +159,24 @@ final class FlightRepository: ObservableObject {
         )
     }
 
-    // MARK: Family flights
+    // MARK: Connection flights
 
-    /// Flights belonging to a family member (by their profileId). Access is
+    /// Flights belonging to a connection (by their profileId). Access is
     /// granted by the `viewers` list on each Flight (ownersDefinedIn), so this
     /// returns rows only where the caller's email is an accepted viewer.
     func listFlights(forProfileId profileId: String) async throws -> [Flight] {
         try await listMyFlights(profileId: profileId)
     }
 
-    // MARK: viewers maintenance (cross-family read access)
+    // MARK: viewers maintenance (cross-account read access)
 
-    /// The emails of accepted family members for a user (the counterparties of
-    /// ACCEPTED FamilyLinks). Single source of truth for who may view my flights.
-    func acceptedFamilyEmails(for myEmail: String) async throws -> [String] {
+    /// The emails of accepted connections for a user (the counterparties of
+    /// ACCEPTED Connections). Single source of truth for who may view my flights.
+    func acceptedConnectionEmails(for myEmail: String) async throws -> [String] {
         let email = myEmail.lowercased()
         let doc = """
         query List($email: String!) {
-          listFamilyLinks(filter: {
+          listConnections(filter: {
             or: [{ inviterEmail: { eq: $email } }, { inviteeEmail: { eq: $email } }]
           }) {
             items { inviterEmail inviteeEmail status }
@@ -168,7 +186,7 @@ final class FlightRepository: ObservableObject {
         let result: GraphQLResponse<JSONValue> = try await Amplify.API.query(
             request: GQL.userPool(doc, variables: ["email": email])
         )
-        let items = try result.get().value(at: "listFamilyLinks.items")?.arrayValue ?? []
+        let items = try result.get().value(at: "listConnections.items")?.arrayValue ?? []
         return items.compactMap { item -> String? in
             guard item.value(at: "status")?.stringValue == "ACCEPTED" else { return nil }
             let inviter = item.value(at: "inviterEmail")?.stringValue?.lowercased() ?? ""
@@ -177,24 +195,26 @@ final class FlightRepository: ObservableObject {
         }.uniqued()
     }
 
-    /// Sets the `viewers` list on a flight (owner + accepted family emails).
+    /// Sets the `viewers` list on a flight (owner + accepted connection emails).
+    /// Uses `publishFlightUpdate` so viewer changes also flow through the live
+    /// subscription path.
     func setViewers(flightId: String, viewers: [String]) async throws {
         let doc = """
-        mutation Update($input: UpdateFlightInput!) {
-          updateFlight(input: $input) { id }
+        mutation Publish($id: ID!, $viewers: [String]) {
+          publishFlightUpdate(id: $id, viewers: $viewers) { \(Self.flightFields) }
         }
         """
-        let vars: [String: Any] = ["input": ["id": flightId, "viewers": viewers]]
+        let vars: [String: Any] = ["id": flightId, "viewers": viewers]
         _ = try await Amplify.API.mutate(
             request: GQL.userPool(doc, variables: vars)
         )
     }
 
-    /// Rewrites `viewers` on ALL of the owner's flights to `owner + family`.
-    /// Called when a family link is accepted/removed so existing flights pick up
+    /// Rewrites `viewers` on ALL of the owner's flights to `owner + connections`.
+    /// Called when a connection is accepted/removed so existing flights pick up
     /// the change. Centralized here to avoid drift.
-    func refreshViewers(ownerEmail: String, profileId: String, familyEmails: [String]) async throws {
-        let viewers = ([ownerEmail.lowercased()] + familyEmails.map { $0.lowercased() }).uniqued()
+    func refreshViewers(ownerEmail: String, profileId: String, connectionEmails: [String]) async throws {
+        let viewers = ([ownerEmail.lowercased()] + connectionEmails.map { $0.lowercased() }).uniqued()
         let mine = try await listMyFlights(profileId: profileId)
         for flight in mine {
             try await setViewers(flightId: flight.id, viewers: viewers)
@@ -215,6 +235,21 @@ final class FlightRepository: ObservableObject {
         """
         return Amplify.API.subscribe(
             request: GQL.userPool(doc, variables: ["ownerEmail": ownerEmail.lowercased()])
+        )
+    }
+
+    /// Viewer-scoped live subscription via the custom `onConnectionFlightChange`
+    /// (bound to `publishFlightUpdate`). Delivers any flight where my email is in
+    /// `viewers` — my own flights AND my connections' — so the Connections screen
+    /// updates live. (The generated owner-scoped onUpdateFlight can't do this.)
+    func subscribeToConnectionFlightChanges(viewerEmail: String) -> AmplifyAsyncThrowingSequence<GraphQLSubscriptionEvent<JSONValue>> {
+        let doc = """
+        subscription OnConnChange($viewerEmail: String!) {
+          onConnectionFlightChange(viewerEmail: $viewerEmail) { \(Self.flightFields) }
+        }
+        """
+        return Amplify.API.subscribe(
+            request: GQL.userPool(doc, variables: ["viewerEmail": viewerEmail.lowercased()])
         )
     }
 

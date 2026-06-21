@@ -1,16 +1,16 @@
 import SwiftUI
 
-struct FamilyView: View {
+struct ConnectionsView: View {
     @EnvironmentObject var session: SessionStore
-    @StateObject private var vm = FamilyViewModel()
+    @StateObject private var vm = ConnectionsViewModel()
     @State private var inviteEmail = ""
 
     var body: some View {
         NavigationStack {
             List {
-                Section("Invite family") {
+                Section("Add a connection") {
                     HStack {
-                        TextField("Family member's email", text: $inviteEmail)
+                        TextField("Their email", text: $inviteEmail)
                             .keyboardType(.emailAddress)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
@@ -51,7 +51,7 @@ struct FamilyView: View {
                     }
                 }
             }
-            .navigationTitle("Family")
+            .navigationTitle("Connections")
             .refreshable { await vm.reload() }
             .alert("Heads up", isPresented: .constant(vm.errorMessage != nil)) {
                 Button("OK") { vm.errorMessage = nil }

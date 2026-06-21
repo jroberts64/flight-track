@@ -13,6 +13,10 @@ import {
   QueryCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
+import { Amplify } from 'aws-amplify';
+import { generateClient } from 'aws-amplify/data';
+import { getAmplifyDataClientConfig } from '@aws-amplify/backend/function/runtime';
+import { env } from '$amplify/env/flight-refresh';
 
 /**
  * Scheduled refresher. Reads flights directly from DynamoDB (the model tables),
@@ -24,7 +28,7 @@ import {
  *   FLIGHT_TABLE            — DynamoDB table for the Flight model
  *   DEVICE_TOKEN_TABLE      — DynamoDB table for DeviceToken
  *   DEVICE_TOKEN_BY_EMAIL   — GSI name on DeviceToken.ownerEmail
- *   FAMILY_LINK_TABLE       — DynamoDB table for FamilyLink
+ *   CONNECTION_TABLE        — DynamoDB table for Connection
  */
 
 const AERO_BASE = 'https://aeroapi.flightaware.com/aeroapi';
@@ -33,7 +37,20 @@ const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
 const FLIGHT_TABLE = process.env.FLIGHT_TABLE!;
 const DEVICE_TABLE = process.env.DEVICE_TOKEN_TABLE!;
-const FAMILY_TABLE = process.env.FAMILY_LINK_TABLE!;
+const CONNECTION_TABLE = process.env.CONNECTION_TABLE!;
+// Amplify data client (IAM-authed via the Lambda's execution role) for calling
+// the `publishFlightUpdate` custom mutation. Configured lazily on first use.
+let dataClientPromise: Promise<ReturnType<typeof generateClient>> | null = null;
+async function getDataClient() {
+  if (!dataClientPromise) {
+    dataClientPromise = (async () => {
+      const { resourceConfig, libraryOptions } = await getAmplifyDataClientConfig(env);
+      Amplify.configure(resourceConfig, libraryOptions);
+      return generateClient({ authMode: 'iam' });
+    })();
+  }
+  return dataClientPromise;
+}
 const NEAR_WINDOW_HOURS = parseInt(process.env.NEAR_WINDOW_HOURS ?? '3', 10);
 const PLATFORM_APP_ARN = process.env.PLATFORM_APP_ARN; // unset until push is enabled
 
@@ -69,35 +86,28 @@ async function refreshOne(flight: Record<string, any>): Promise<void> {
   const events = diff(flight, live);
   if (events.length === 0) return;
 
-  await ddb.send(
-    new UpdateCommand({
-      TableName: FLIGHT_TABLE,
-      Key: { id: flight.id },
-      UpdateExpression:
-        'SET #s=:s, estimatedOut=:eo, estimatedIn=:ei, actualOut=:ao, actualIn=:ai, ' +
-        'originGate=:og, destinationGate=:dg, originTerminal=:ot, destinationTerminal=:dt, ' +
-        'progressPercent=:pp, lastRefreshedAt=:lr',
-      ExpressionAttributeNames: { '#s': 'status' },
-      ExpressionAttributeValues: {
-        ':s': live.status,
-        ':eo': live.estimatedOut ?? flight.estimatedOut ?? null,
-        ':ei': live.estimatedIn ?? flight.estimatedIn ?? null,
-        ':ao': live.actualOut ?? flight.actualOut ?? null,
-        ':ai': live.actualIn ?? flight.actualIn ?? null,
-        ':og': live.originGate ?? flight.originGate ?? null,
-        ':dg': live.destinationGate ?? flight.destinationGate ?? null,
-        ':ot': live.originTerminal ?? flight.originTerminal ?? null,
-        ':dt': live.destinationTerminal ?? flight.destinationTerminal ?? null,
-        ':pp': live.progressPercent ?? flight.progressPercent ?? null,
-        ':lr': new Date().toISOString(),
-      },
-    })
-  );
+  // Write through the custom `publishFlightUpdate` AppSync mutation (IAM-signed)
+  // rather than a direct DynamoDB write, so the viewer-aware
+  // `onConnectionFlightChange` subscription fires for connections watching this
+  // flight. Only send fields with a value (partial update on the resolver side).
+  await publishFlightUpdate(flight.id, {
+    status: live.status,
+    estimatedOut: live.estimatedOut ?? flight.estimatedOut ?? null,
+    estimatedIn: live.estimatedIn ?? flight.estimatedIn ?? null,
+    actualOut: live.actualOut ?? flight.actualOut ?? null,
+    actualIn: live.actualIn ?? flight.actualIn ?? null,
+    originGate: live.originGate ?? flight.originGate ?? null,
+    destinationGate: live.destinationGate ?? flight.destinationGate ?? null,
+    originTerminal: live.originTerminal ?? flight.originTerminal ?? null,
+    destinationTerminal: live.destinationTerminal ?? flight.destinationTerminal ?? null,
+    progressPercent: live.progressPercent ?? flight.progressPercent ?? null,
+    lastRefreshedAt: new Date().toISOString(),
+  });
 
   const message = `${flight.flightNumber}: ${events.join('; ')}`;
   const recipients = await recipientsFor(flight);
   await Promise.allSettled(
-    recipients.map((arn) => publish(arn, flight.flightNumber, message))
+    recipients.map((arn) => publish(arn, flight.flightNumber, message, flight.id))
   );
   console.log(`pushed "${message}" to ${recipients.length} endpoint(s)`);
 }
@@ -142,7 +152,52 @@ function diff(prev: Record<string, any>, live: AeroNormalized): string[] {
   return events;
 }
 
-/** SNS endpoint ARNs for the flight owner + accepted family members. */
+/**
+ * Writes a flight change via the custom `publishFlightUpdate` AppSync mutation
+ * (IAM-authed Amplify data client). Going through AppSync rather than a direct
+ * DynamoDB write is what fires the `onConnectionFlightChange` subscription for
+ * viewers. Only non-null fields are sent (partial update on the resolver side).
+ */
+async function publishFlightUpdate(
+  id: string,
+  fields: Record<string, string | number | null>
+): Promise<void> {
+  const args: Record<string, string | number> = { id };
+  for (const [k, v] of Object.entries(fields)) {
+    if (v !== null && v !== undefined) args[k] = v;
+  }
+
+  const query = `mutation Publish(
+    $id: ID!, $status: String, $estimatedOut: String, $estimatedIn: String,
+    $actualOut: String, $actualIn: String, $originGate: String,
+    $destinationGate: String, $originTerminal: String, $destinationTerminal: String,
+    $progressPercent: Int, $lastRefreshedAt: String
+  ) {
+    publishFlightUpdate(
+      id: $id, status: $status, estimatedOut: $estimatedOut, estimatedIn: $estimatedIn,
+      actualOut: $actualOut, actualIn: $actualIn, originGate: $originGate,
+      destinationGate: $destinationGate, originTerminal: $originTerminal,
+      destinationTerminal: $destinationTerminal, progressPercent: $progressPercent,
+      lastRefreshedAt: $lastRefreshedAt
+    ) {
+      id ownerEmail flightNumber status originGate destinationGate originTerminal
+      destinationTerminal estimatedOut estimatedIn actualOut actualIn
+      progressPercent lastRefreshedAt viewers
+    }
+  }`;
+  // ^ must select `viewers` (the subscription filter field) + the fields the
+  // app's subscription reads, or onConnectionFlightChange won't fire.
+
+  try {
+    const client = await getDataClient();
+    const res: any = await (client as any).graphql({ query, variables: args });
+    if (res?.errors) console.error('publishFlightUpdate errors:', JSON.stringify(res.errors));
+  } catch (e) {
+    console.error('publishFlightUpdate failed:', e);
+  }
+}
+
+/** SNS endpoint ARNs for the flight owner + accepted connections. */
 async function recipientsFor(flight: Record<string, any>): Promise<string[]> {
   const ownerEmail = (flight.ownerEmail ?? flight.profileEmail ?? '').toLowerCase();
   const emails = new Set<string>();
@@ -150,9 +205,9 @@ async function recipientsFor(flight: Record<string, any>): Promise<string[]> {
 
   // Owner email may not be denormalized on Flight; fall back via profile lookup
   // is skipped for brevity — see note in README. If absent, we still notify any
-  // family links that reference the owner once email is present.
+  // connections that reference the owner once email is present.
   if (ownerEmail) {
-    const links = await scanAll(FAMILY_TABLE);
+    const links = await scanAll(CONNECTION_TABLE);
     for (const l of links) {
       if (l.status !== 'ACCEPTED') continue;
       const a = (l.inviterEmail ?? '').toLowerCase();
@@ -217,9 +272,18 @@ async function ensureEndpoint(device: Record<string, any>): Promise<string | nul
   }
 }
 
-async function publish(endpointArn: string, title: string, body: string): Promise<void> {
+async function publish(
+  endpointArn: string,
+  title: string,
+  body: string,
+  flightId?: string
+): Promise<void> {
   const apns = JSON.stringify({
-    aps: { alert: { title, body }, sound: 'default' },
+    // `content-available: 1` lets iOS wake the app in the background to refresh
+    // before the user opens it; the alert still shows. `flightId` lets the app
+    // refresh just the changed flight (falls back to a full reload if absent).
+    aps: { alert: { title, body }, sound: 'default', 'content-available': 1 },
+    flightId,
   });
   await sns.send(
     new PublishCommand({
