@@ -52,6 +52,9 @@ async function getDataClient() {
   return dataClientPromise;
 }
 const NEAR_WINDOW_HOURS = parseInt(process.env.NEAR_WINDOW_HOURS ?? '3', 10);
+// Delete landed flights this many hours after they arrive, so stale rows don't
+// pile up in everyone's list. Overridable via env.
+const LANDED_TTL_HOURS = parseInt(process.env.LANDED_TTL_HOURS ?? '12', 10);
 const PLATFORM_APP_ARN = process.env.PLATFORM_APP_ARN; // unset until push is enabled
 
 export const handler: ScheduledHandler = async () => {
@@ -59,7 +62,28 @@ export const handler: ScheduledHandler = async () => {
   const now = Date.now();
   const windowMs = NEAR_WINDOW_HOURS * 3600 * 1000;
 
+  // Prune flights that landed > LANDED_TTL_HOURS ago. Skip refreshing them.
+  const ttlMs = LANDED_TTL_HOURS * 3600 * 1000;
+  const stale = flights.filter((f) => {
+    if (f.status !== 'LANDED') return false;
+    const arr = ms(f.actualIn ?? f.estimatedIn ?? f.scheduledIn);
+    return arr !== null && now - arr >= ttlMs;
+  });
+  for (const f of stale) {
+    try {
+      // Delete through the custom AppSync mutation (not a raw DeleteCommand) so
+      // the viewer-aware onConnectionFlightDelete subscription fires and the
+      // flight disappears live from owners' and connections' screens.
+      await publishFlightDelete(f.id);
+    } catch (e) {
+      console.error(`prune failed for ${f.flightNumber}/${f.id}:`, e);
+    }
+  }
+  if (stale.length) console.log(`flight-refresh: pruned ${stale.length} landed flight(s)`);
+
+  const staleIds = new Set(stale.map((f) => f.id));
   const near = flights.filter((f) => {
+    if (staleIds.has(f.id)) return false;
     const dep = ms(f.estimatedOut ?? f.scheduledOut);
     const arr = ms(f.estimatedIn ?? f.scheduledIn);
     // In window if it departs soon, or is currently between dep and arr+window.
@@ -194,6 +218,25 @@ async function publishFlightUpdate(
     if (res?.errors) console.error('publishFlightUpdate errors:', JSON.stringify(res.errors));
   } catch (e) {
     console.error('publishFlightUpdate failed:', e);
+  }
+}
+
+/**
+ * Deletes a flight via the custom `publishFlightDelete` AppSync mutation
+ * (IAM-authed). Mirrors publishFlightUpdate: going through AppSync rather than a
+ * raw DynamoDB DeleteItem is what fires the `onConnectionFlightDelete`
+ * subscription for viewers. Selects `viewers` so the subscription filter has a
+ * field to match against.
+ */
+async function publishFlightDelete(id: string): Promise<void> {
+  const query = `mutation Delete($id: ID!) {
+    publishFlightDelete(id: $id) { id ownerEmail flightNumber viewers }
+  }`;
+  const client = await getDataClient();
+  const res: any = await (client as any).graphql({ query, variables: { id } });
+  if (res?.errors) {
+    // Surface as a throw so the caller's try/catch logs it per-flight.
+    throw new Error(`publishFlightDelete errors: ${JSON.stringify(res.errors)}`);
   }
 }
 

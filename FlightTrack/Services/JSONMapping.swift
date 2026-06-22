@@ -31,15 +31,26 @@ extension JSONValue {
 
     var dateValue: Date? {
         guard let s = stringValue else { return nil }
-        return ISO8601DateFormatter.flexible.date(from: s)
+        // AeroAPI emits ISO8601 without fractional seconds (e.g.
+        // "2026-06-21T14:30:00Z"); AppSync preserves whatever it stored, so we
+        // may also see fractional seconds. Try both — a parser configured with
+        // .withFractionalSeconds will REJECT a string that lacks them.
+        return ISO8601DateFormatter.withFraction.date(from: s)
+            ?? ISO8601DateFormatter.noFraction.date(from: s)
     }
 }
 
 extension ISO8601DateFormatter {
     /// AeroAPI / AppSync may or may not include fractional seconds.
-    static let flexible: ISO8601DateFormatter = {
+    static let withFraction: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
+    static let noFraction: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
         return f
     }()
 }
@@ -142,7 +153,7 @@ extension Flight {
     /// live-status fields, as individual arguments (not an input object). Nils
     /// are dropped so the resolver does a partial update.
     var publishUpdateVars: [String: Any] {
-        let iso = ISO8601DateFormatter.flexible
+        let iso = ISO8601DateFormatter.withFraction
         let vars: [String: Any?] = [
             "id": id,
             "status": status.rawValue,
@@ -162,7 +173,7 @@ extension Flight {
     }
 
     private var baseInput: [String: Any?] {
-        let iso = ISO8601DateFormatter.flexible
+        let iso = ISO8601DateFormatter.withFraction
         return [
             "profileId": profileId,
             "ownerEmail": ownerEmail,

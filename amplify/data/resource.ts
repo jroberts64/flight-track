@@ -146,6 +146,49 @@ const schema = a.schema({
   // change live. Authorized to any authenticated caller; the resolver enforces
   // that only the owner OR a listed viewer may write (defense kept simple for a
   // small-group app — the app only ever sends owner-initiated writes).
+  // Custom flight-CREATE mutation — the create counterpart of
+  // `publishFlightUpdate`. Routes creates through AppSync (instead of the
+  // generated `createFlight`, whose onCreateFlight subscription is owner-only)
+  // so the viewer-aware `onConnectionFlightCreate` subscription fires and a new
+  // flight appears live on connections' screens, not just on reload. The
+  // resolver generates the id + system fields and writes the full row. All
+  // fields except `id` are accepted; required model fields must be supplied by
+  // the caller (the resolver does not default them).
+  publishFlightCreate: a
+    .mutation()
+    .arguments({
+      profileId: a.id().required(),
+      ownerEmail: a.string().required(),
+      flightNumber: a.string().required(),
+      faFlightId: a.string(),
+      departureDate: a.string().required(),
+      originIata: a.string().required(),
+      destinationIata: a.string().required(),
+      scheduledOut: a.string(),
+      scheduledIn: a.string(),
+      estimatedOut: a.string(),
+      estimatedIn: a.string(),
+      actualOut: a.string(),
+      actualIn: a.string(),
+      status: a.string(),
+      originGate: a.string(),
+      destinationGate: a.string(),
+      originTerminal: a.string(),
+      destinationTerminal: a.string(),
+      progressPercent: a.integer(),
+      lastRefreshedAt: a.string(),
+      note: a.string(),
+      viewers: a.string().array(),
+    })
+    .returns(a.ref('Flight'))
+    .authorization((allow) => [allow.authenticated()])
+    .handler(
+      a.handler.custom({
+        dataSource: a.ref('Flight'),
+        entry: './publish-flight-create.js',
+      })
+    ),
+
   publishFlightUpdate: a
     .mutation()
     .arguments({
@@ -176,6 +219,25 @@ const schema = a.schema({
       })
     ),
 
+  // Custom flight-DELETE mutation — the delete counterpart of
+  // `publishFlightUpdate`. Routes deletes through AppSync (instead of a raw
+  // DynamoDB DeleteItem) so the viewer-aware `onConnectionFlightDelete`
+  // subscription below fires for every viewer of the row. Returns the deleted
+  // Flight (incl. `viewers`) so the subscription filter has fields to match.
+  // Both the iOS app and the refresh Lambda (via IAM) call this — it is the
+  // single delete chokepoint, mirroring publishFlightUpdate for writes.
+  publishFlightDelete: a
+    .mutation()
+    .arguments({ id: a.id().required() })
+    .returns(a.ref('Flight'))
+    .authorization((allow) => [allow.authenticated()])
+    .handler(
+      a.handler.custom({
+        dataSource: a.ref('Flight'),
+        entry: './publish-flight-delete.js',
+      })
+    ),
+
   // Live cross-account flight updates. Bound to `publishFlightUpdate` above (a
   // custom subscription CAN attach to a custom mutation; it could not reliably
   // attach to the generated updateFlight). The subscriber passes their own
@@ -185,6 +247,41 @@ const schema = a.schema({
   onConnectionFlightChange: a
     .subscription()
     .for(a.ref('publishFlightUpdate'))
+    .arguments({ viewerEmail: a.string().required() })
+    .returns(a.ref('Flight'))
+    .authorization((allow) => [allow.authenticated()])
+    .handler(
+      a.handler.custom({
+        entry: './on-connection-flight-change.js',
+      })
+    ),
+
+  // Live cross-account flight CREATES. Bound to `publishFlightCreate`. Same
+  // viewer-email filter as the others: AppSync delivers the new Flight only to
+  // subscribers whose email is in its `viewers`. The app opens this with
+  // viewerEmail = me and inserts the flight into the UI on receipt — so a new
+  // flight a connection adds appears live, not just on the next reload.
+  onConnectionFlightCreate: a
+    .subscription()
+    .for(a.ref('publishFlightCreate'))
+    .arguments({ viewerEmail: a.string().required() })
+    .returns(a.ref('Flight'))
+    .authorization((allow) => [allow.authenticated()])
+    .handler(
+      a.handler.custom({
+        entry: './on-connection-flight-change.js',
+      })
+    ),
+
+  // Live cross-account flight DELETES. Bound to `publishFlightDelete`. Same
+  // viewer-email filter as onConnectionFlightChange: AppSync delivers the
+  // deleted Flight only to subscribers whose email is in its `viewers`. The app
+  // opens this with viewerEmail = me and removes the flight from the UI on
+  // receipt — so an owner-side or Lambda-side delete propagates live to
+  // connections, not just on the next reload.
+  onConnectionFlightDelete: a
+    .subscription()
+    .for(a.ref('publishFlightDelete'))
     .arguments({ viewerEmail: a.string().required() })
     .returns(a.ref('Flight'))
     .authorization((allow) => [allow.authenticated()])
