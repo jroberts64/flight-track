@@ -39,10 +39,21 @@ struct Flight: Identifiable, Hashable, Codable {
     var effectiveDeparture: Date? { actualOut ?? estimatedOut ?? scheduledOut }
     var effectiveArrival: Date? { actualIn ?? estimatedIn ?? scheduledIn }
 
+    /// True only while the flight is still expected to run late. A completed
+    /// flight (terminal status, or one that already has an actual departure or
+    /// arrival) is never "delayed" — its estimate is moot, so the badge shows the
+    /// real status instead. Threshold matches the backend notification gate.
     var isDelayed: Bool {
+        // Done flying: show the actual status, not a stale delay.
+        if status == .landed || status == .cancelled || status == .diverted { return false }
+        if actualIn != nil { return false }
         guard let sched = scheduledOut, let est = estimatedOut else { return status == .delayed }
-        return est.timeIntervalSince(sched) > 15 * 60
+        return est.timeIntervalSince(sched) > Flight.delayThreshold
     }
+
+    /// Estimated time must slip at least this far past schedule to read as delayed.
+    /// Mirrors the refresh Lambda's DELAY_THRESHOLD_MIN (default 10 min).
+    static let delayThreshold: TimeInterval = 10 * 60
 }
 
 enum FlightStatus: String, Codable, CaseIterable {

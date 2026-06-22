@@ -55,6 +55,10 @@ const NEAR_WINDOW_HOURS = parseInt(process.env.NEAR_WINDOW_HOURS ?? '3', 10);
 // Delete landed flights this many hours after they arrive, so stale rows don't
 // pile up in everyone's list. Overridable via env.
 const LANDED_TTL_HOURS = parseInt(process.env.LANDED_TTL_HOURS ?? '12', 10);
+// Notify when a flight's estimated time shifts at least this many minutes from
+// schedule (in either direction). Persistence is unconditional on any change;
+// this gate is only for push notifications. Overridable via env.
+const THRESHOLD_MIN = parseInt(process.env.DELAY_THRESHOLD_MIN ?? '10', 10);
 const PLATFORM_APP_ARN = process.env.PLATFORM_APP_ARN; // unset until push is enabled
 
 export const handler: ScheduledHandler = async () => {
@@ -107,15 +111,13 @@ async function refreshOne(flight: Record<string, any>): Promise<void> {
   const live = await fetchAero(flight.flightNumber, flight.departureDate);
   if (!live) return;
 
-  const events = diff(flight, live);
-  if (events.length === 0) return;
-
-  // Write through the custom `publishFlightUpdate` AppSync mutation (IAM-signed)
-  // rather than a direct DynamoDB write, so the viewer-aware
-  // `onConnectionFlightChange` subscription fires for connections watching this
-  // flight. Only send fields with a value (partial update on the resolver side).
-  await publishFlightUpdate(flight.id, {
+  // Persisted snapshot from live data. Prefer the live value, falling back to
+  // the stored one so AeroAPI dropping a field doesn't null it out. Scheduled
+  // times are now refreshed too (airlines occasionally re-time a flight).
+  const next = {
     status: live.status,
+    scheduledOut: live.scheduledOut ?? flight.scheduledOut ?? null,
+    scheduledIn: live.scheduledIn ?? flight.scheduledIn ?? null,
     estimatedOut: live.estimatedOut ?? flight.estimatedOut ?? null,
     estimatedIn: live.estimatedIn ?? flight.estimatedIn ?? null,
     actualOut: live.actualOut ?? flight.actualOut ?? null,
@@ -125,8 +127,29 @@ async function refreshOne(flight: Record<string, any>): Promise<void> {
     originTerminal: live.originTerminal ?? flight.originTerminal ?? null,
     destinationTerminal: live.destinationTerminal ?? flight.destinationTerminal ?? null,
     progressPercent: live.progressPercent ?? flight.progressPercent ?? null,
+  };
+
+  // PERSIST on ANY change — decoupled from notification. This is what makes an
+  // EARLIER departure/arrival or a sub-threshold shift actually save (and
+  // propagate live via onConnectionFlightChange). Notifications are a separate,
+  // higher bar below.
+  const changed = Object.keys(next).some(
+    (k) => (next as any)[k] !== (flight[k] ?? null)
+  );
+  if (!changed) return;
+
+  // Write through the custom `publishFlightUpdate` AppSync mutation (IAM-signed)
+  // rather than a direct DynamoDB write, so the viewer-aware
+  // `onConnectionFlightChange` subscription fires for connections watching this
+  // flight. Only send fields with a value (partial update on the resolver side).
+  await publishFlightUpdate(flight.id, {
+    ...next,
     lastRefreshedAt: new Date().toISOString(),
   });
+
+  // NOTIFY only on changes worth a push (status, ±threshold time shifts, gates).
+  const events = diff(flight, live);
+  if (events.length === 0) return;
 
   const message = `${flight.flightNumber}: ${events.join('; ')}`;
   const recipients = await recipientsFor(flight);
@@ -149,14 +172,32 @@ function diff(prev: Record<string, any>, live: AeroNormalized): string[] {
     } else if (live.status === 'LANDED') events.push('Landed');
   }
 
-  // Delay: estimated departure/arrival moved > 15 min vs scheduled.
-  const depDelay = delayMin(prev.scheduledOut, live.estimatedOut);
-  if (depDelay !== null && depDelay >= 15 && delayMin(prev.scheduledOut, prev.estimatedOut) !== depDelay) {
-    events.push(`Departure delayed ~${depDelay} min`);
+  // Time shift: estimated departure/arrival moved >= THRESHOLD_MIN vs schedule,
+  // in EITHER direction (delayed or earlier), and only when the shift actually
+  // changed since last refresh. delayMin is positive when late, negative early.
+  const depShift = delayMin(prev.scheduledOut, live.estimatedOut);
+  if (
+    depShift !== null &&
+    Math.abs(depShift) >= THRESHOLD_MIN &&
+    delayMin(prev.scheduledOut, prev.estimatedOut) !== depShift
+  ) {
+    events.push(
+      depShift >= 0
+        ? `Departure delayed ~${depShift} min`
+        : `Departure now ~${-depShift} min earlier`
+    );
   }
-  const arrDelay = delayMin(prev.scheduledIn, live.estimatedIn);
-  if (arrDelay !== null && arrDelay >= 15 && delayMin(prev.scheduledIn, prev.estimatedIn) !== arrDelay) {
-    events.push(`Arrival delayed ~${arrDelay} min`);
+  const arrShift = delayMin(prev.scheduledIn, live.estimatedIn);
+  if (
+    arrShift !== null &&
+    Math.abs(arrShift) >= THRESHOLD_MIN &&
+    delayMin(prev.scheduledIn, prev.estimatedIn) !== arrShift
+  ) {
+    events.push(
+      arrShift >= 0
+        ? `Arrival delayed ~${arrShift} min`
+        : `Arrival now ~${-arrShift} min earlier`
+    );
   }
 
   // Gate / terminal changes.
@@ -341,6 +382,8 @@ async function publish(
 
 interface AeroNormalized {
   status: string;
+  scheduledOut: string | null;
+  scheduledIn: string | null;
   estimatedOut: string | null;
   estimatedIn: string | null;
   actualOut: string | null;
@@ -375,6 +418,8 @@ async function fetchAero(flightNumber: string, date: string): Promise<AeroNormal
   );
   return {
     status: mapStatus(f),
+    scheduledOut: f.scheduled_out ?? null,
+    scheduledIn: f.scheduled_in ?? null,
     estimatedOut: f.estimated_out ?? null,
     estimatedIn: f.estimated_in ?? null,
     actualOut: f.actual_out ?? null,
