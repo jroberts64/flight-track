@@ -1,22 +1,17 @@
 import type { ScheduledHandler } from 'aws-lambda';
-import {
-  SNSClient,
-  PublishCommand,
-  CreatePlatformEndpointCommand,
-} from '@aws-sdk/client-sns';
+import { SNSClient } from '@aws-sdk/client-sns';
 import {
   DynamoDBClient,
 } from '@aws-sdk/client-dynamodb';
 import {
   DynamoDBDocumentClient,
   ScanCommand,
-  QueryCommand,
-  UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { Amplify } from 'aws-amplify';
 import { generateClient } from 'aws-amplify/data';
 import { getAmplifyDataClientConfig } from '@aws-amplify/backend/function/runtime';
 import { env } from '$amplify/env/flight-refresh';
+import { endpointsForEmails, publish } from '../shared/push';
 
 /**
  * Scheduled refresher. Reads flights directly from DynamoDB (the model tables),
@@ -52,14 +47,47 @@ async function getDataClient() {
   return dataClientPromise;
 }
 const NEAR_WINDOW_HOURS = parseInt(process.env.NEAR_WINDOW_HOURS ?? '3', 10);
+// Delete landed flights this many hours after they arrive, so stale rows don't
+// pile up in everyone's list. Overridable via env.
+const LANDED_TTL_HOURS = parseInt(process.env.LANDED_TTL_HOURS ?? '12', 10);
+// Notify when a flight's estimated time shifts at least this many minutes from
+// schedule (in either direction). Persistence is unconditional on any change;
+// this gate is only for push notifications. Overridable via env.
+const THRESHOLD_MIN = parseInt(process.env.DELAY_THRESHOLD_MIN ?? '10', 10);
 const PLATFORM_APP_ARN = process.env.PLATFORM_APP_ARN; // unset until push is enabled
+const pushCfg = {
+  deviceTable: DEVICE_TABLE,
+  gsiName: process.env.DEVICE_TOKEN_BY_EMAIL!,
+  platformAppArn: PLATFORM_APP_ARN,
+};
 
 export const handler: ScheduledHandler = async () => {
   const flights = await scanAll(FLIGHT_TABLE);
   const now = Date.now();
   const windowMs = NEAR_WINDOW_HOURS * 3600 * 1000;
 
+  // Prune flights that landed > LANDED_TTL_HOURS ago. Skip refreshing them.
+  const ttlMs = LANDED_TTL_HOURS * 3600 * 1000;
+  const stale = flights.filter((f) => {
+    if (f.status !== 'LANDED') return false;
+    const arr = ms(f.actualIn ?? f.estimatedIn ?? f.scheduledIn);
+    return arr !== null && now - arr >= ttlMs;
+  });
+  for (const f of stale) {
+    try {
+      // Delete through the custom AppSync mutation (not a raw DeleteCommand) so
+      // the viewer-aware onConnectionFlightDelete subscription fires and the
+      // flight disappears live from owners' and connections' screens.
+      await publishFlightDelete(f.id);
+    } catch (e) {
+      console.error(`prune failed for ${f.flightNumber}/${f.id}:`, e);
+    }
+  }
+  if (stale.length) console.log(`flight-refresh: pruned ${stale.length} landed flight(s)`);
+
+  const staleIds = new Set(stale.map((f) => f.id));
   const near = flights.filter((f) => {
+    if (staleIds.has(f.id)) return false;
     const dep = ms(f.estimatedOut ?? f.scheduledOut);
     const arr = ms(f.estimatedIn ?? f.scheduledIn);
     // In window if it departs soon, or is currently between dep and arr+window.
@@ -83,15 +111,13 @@ async function refreshOne(flight: Record<string, any>): Promise<void> {
   const live = await fetchAero(flight.flightNumber, flight.departureDate);
   if (!live) return;
 
-  const events = diff(flight, live);
-  if (events.length === 0) return;
-
-  // Write through the custom `publishFlightUpdate` AppSync mutation (IAM-signed)
-  // rather than a direct DynamoDB write, so the viewer-aware
-  // `onConnectionFlightChange` subscription fires for connections watching this
-  // flight. Only send fields with a value (partial update on the resolver side).
-  await publishFlightUpdate(flight.id, {
+  // Persisted snapshot from live data. Prefer the live value, falling back to
+  // the stored one so AeroAPI dropping a field doesn't null it out. Scheduled
+  // times are now refreshed too (airlines occasionally re-time a flight).
+  const next = {
     status: live.status,
+    scheduledOut: live.scheduledOut ?? flight.scheduledOut ?? null,
+    scheduledIn: live.scheduledIn ?? flight.scheduledIn ?? null,
     estimatedOut: live.estimatedOut ?? flight.estimatedOut ?? null,
     estimatedIn: live.estimatedIn ?? flight.estimatedIn ?? null,
     actualOut: live.actualOut ?? flight.actualOut ?? null,
@@ -101,13 +127,34 @@ async function refreshOne(flight: Record<string, any>): Promise<void> {
     originTerminal: live.originTerminal ?? flight.originTerminal ?? null,
     destinationTerminal: live.destinationTerminal ?? flight.destinationTerminal ?? null,
     progressPercent: live.progressPercent ?? flight.progressPercent ?? null,
+  };
+
+  // PERSIST on ANY change — decoupled from notification. This is what makes an
+  // EARLIER departure/arrival or a sub-threshold shift actually save (and
+  // propagate live via onConnectionFlightChange). Notifications are a separate,
+  // higher bar below.
+  const changed = Object.keys(next).some(
+    (k) => (next as any)[k] !== (flight[k] ?? null)
+  );
+  if (!changed) return;
+
+  // Write through the custom `publishFlightUpdate` AppSync mutation (IAM-signed)
+  // rather than a direct DynamoDB write, so the viewer-aware
+  // `onConnectionFlightChange` subscription fires for connections watching this
+  // flight. Only send fields with a value (partial update on the resolver side).
+  await publishFlightUpdate(flight.id, {
+    ...next,
     lastRefreshedAt: new Date().toISOString(),
   });
+
+  // NOTIFY only on changes worth a push (status, ±threshold time shifts, gates).
+  const events = diff(flight, live);
+  if (events.length === 0) return;
 
   const message = `${flight.flightNumber}: ${events.join('; ')}`;
   const recipients = await recipientsFor(flight);
   await Promise.allSettled(
-    recipients.map((arn) => publish(arn, flight.flightNumber, message, flight.id))
+    recipients.map((arn) => publish(sns, arn, flight.flightNumber, message, { flightId: flight.id }))
   );
   console.log(`pushed "${message}" to ${recipients.length} endpoint(s)`);
 }
@@ -125,14 +172,32 @@ function diff(prev: Record<string, any>, live: AeroNormalized): string[] {
     } else if (live.status === 'LANDED') events.push('Landed');
   }
 
-  // Delay: estimated departure/arrival moved > 15 min vs scheduled.
-  const depDelay = delayMin(prev.scheduledOut, live.estimatedOut);
-  if (depDelay !== null && depDelay >= 15 && delayMin(prev.scheduledOut, prev.estimatedOut) !== depDelay) {
-    events.push(`Departure delayed ~${depDelay} min`);
+  // Time shift: estimated departure/arrival moved >= THRESHOLD_MIN vs schedule,
+  // in EITHER direction (delayed or earlier), and only when the shift actually
+  // changed since last refresh. delayMin is positive when late, negative early.
+  const depShift = delayMin(prev.scheduledOut, live.estimatedOut);
+  if (
+    depShift !== null &&
+    Math.abs(depShift) >= THRESHOLD_MIN &&
+    delayMin(prev.scheduledOut, prev.estimatedOut) !== depShift
+  ) {
+    events.push(
+      depShift >= 0
+        ? `Departure delayed ~${depShift} min`
+        : `Departure now ~${-depShift} min earlier`
+    );
   }
-  const arrDelay = delayMin(prev.scheduledIn, live.estimatedIn);
-  if (arrDelay !== null && arrDelay >= 15 && delayMin(prev.scheduledIn, prev.estimatedIn) !== arrDelay) {
-    events.push(`Arrival delayed ~${arrDelay} min`);
+  const arrShift = delayMin(prev.scheduledIn, live.estimatedIn);
+  if (
+    arrShift !== null &&
+    Math.abs(arrShift) >= THRESHOLD_MIN &&
+    delayMin(prev.scheduledIn, prev.estimatedIn) !== arrShift
+  ) {
+    events.push(
+      arrShift >= 0
+        ? `Arrival delayed ~${arrShift} min`
+        : `Arrival now ~${-arrShift} min earlier`
+    );
   }
 
   // Gate / terminal changes.
@@ -197,6 +262,25 @@ async function publishFlightUpdate(
   }
 }
 
+/**
+ * Deletes a flight via the custom `publishFlightDelete` AppSync mutation
+ * (IAM-authed). Mirrors publishFlightUpdate: going through AppSync rather than a
+ * raw DynamoDB DeleteItem is what fires the `onConnectionFlightDelete`
+ * subscription for viewers. Selects `viewers` so the subscription filter has a
+ * field to match against.
+ */
+async function publishFlightDelete(id: string): Promise<void> {
+  const query = `mutation Delete($id: ID!) {
+    publishFlightDelete(id: $id) { id ownerEmail flightNumber viewers }
+  }`;
+  const client = await getDataClient();
+  const res: any = await (client as any).graphql({ query, variables: { id } });
+  if (res?.errors) {
+    // Surface as a throw so the caller's try/catch logs it per-flight.
+    throw new Error(`publishFlightDelete errors: ${JSON.stringify(res.errors)}`);
+  }
+}
+
 /** SNS endpoint ARNs for the flight owner + accepted connections. */
 async function recipientsFor(flight: Record<string, any>): Promise<string[]> {
   const ownerEmail = (flight.ownerEmail ?? flight.profileEmail ?? '').toLowerCase();
@@ -217,87 +301,17 @@ async function recipientsFor(flight: Record<string, any>): Promise<string[]> {
     }
   }
 
-  const arns: string[] = [];
-  for (const email of emails) {
-    const res = await ddb
-      .send(
-        new QueryCommand({
-          TableName: DEVICE_TABLE,
-          IndexName: process.env.DEVICE_TOKEN_BY_EMAIL,
-          KeyConditionExpression: 'ownerEmail = :e',
-          ExpressionAttributeValues: { ':e': email },
-        })
-      )
-      .catch((err) => {
-        console.error(`device lookup failed for ${email}:`, err);
-        return null;
-      });
-    for (const item of res?.Items ?? []) {
-      const arn = await ensureEndpoint(item);
-      if (arn) arns.push(arn);
-    }
-  }
-  return arns;
-}
-
-/**
- * Returns the device's SNS endpoint ARN, creating it lazily on first use.
- * The iOS app writes DeviceToken rows with no endpoint; we mint one here from
- * the raw APNs token, persist it, and reuse it on subsequent runs.
- */
-async function ensureEndpoint(device: Record<string, any>): Promise<string | null> {
-  if (device.snsEndpointArn) return device.snsEndpointArn as string;
-  if (!PLATFORM_APP_ARN || !device.token) return null;
-  try {
-    const created = await sns.send(
-      new CreatePlatformEndpointCommand({
-        PlatformApplicationArn: PLATFORM_APP_ARN,
-        Token: device.token,
-        CustomUserData: device.ownerEmail,
-      })
-    );
-    const arn = created.EndpointArn!;
-    await ddb.send(
-      new UpdateCommand({
-        TableName: DEVICE_TABLE,
-        Key: { id: device.id },
-        UpdateExpression: 'SET snsEndpointArn = :a, updatedAt = :u',
-        ExpressionAttributeValues: { ':a': arn, ':u': new Date().toISOString() },
-      })
-    );
-    return arn;
-  } catch (e) {
-    console.error(`failed to create endpoint for ${device.ownerEmail}:`, e);
-    return null;
-  }
-}
-
-async function publish(
-  endpointArn: string,
-  title: string,
-  body: string,
-  flightId?: string
-): Promise<void> {
-  const apns = JSON.stringify({
-    // `content-available: 1` lets iOS wake the app in the background to refresh
-    // before the user opens it; the alert still shows. `flightId` lets the app
-    // refresh just the changed flight (falls back to a full reload if absent).
-    aps: { alert: { title, body }, sound: 'default', 'content-available': 1 },
-    flightId,
-  });
-  await sns.send(
-    new PublishCommand({
-      TargetArn: endpointArn,
-      MessageStructure: 'json',
-      Message: JSON.stringify({ default: body, APNS: apns, APNS_SANDBOX: apns }),
-    })
-  );
+  // Resolve each recipient email to its device SNS endpoint(s) via the shared
+  // push helper (queries the DeviceToken GSI + mints endpoints lazily).
+  return endpointsForEmails(ddb, sns, emails, pushCfg);
 }
 
 // --- AeroAPI (shares the same upstream as aeroapi-lookup) -----------------
 
 interface AeroNormalized {
   status: string;
+  scheduledOut: string | null;
+  scheduledIn: string | null;
   estimatedOut: string | null;
   estimatedIn: string | null;
   actualOut: string | null;
@@ -332,6 +346,8 @@ async function fetchAero(flightNumber: string, date: string): Promise<AeroNormal
   );
   return {
     status: mapStatus(f),
+    scheduledOut: f.scheduled_out ?? null,
+    scheduledIn: f.scheduled_in ?? null,
     estimatedOut: f.estimated_out ?? null,
     estimatedIn: f.estimated_in ?? null,
     actualOut: f.actual_out ?? null,

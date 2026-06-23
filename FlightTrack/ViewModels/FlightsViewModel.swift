@@ -13,6 +13,8 @@ final class FlightsViewModel: ObservableObject {
     private var profileId: String?
     private var ownerEmail: String?
     private var subscriptionTask: Task<Void, Never>?
+    private var createSubscriptionTask: Task<Void, Never>?
+    private var deleteSubscriptionTask: Task<Void, Never>?
     private var pushObserver: NSObjectProtocol?
 
     func start(profileId: String, ownerEmail: String) {
@@ -20,6 +22,8 @@ final class FlightsViewModel: ObservableObject {
         self.ownerEmail = ownerEmail
         Task { await reload() }
         subscribe(ownerEmail: ownerEmail)
+        subscribeToCreates(ownerEmail: ownerEmail)
+        subscribeToDeletes(ownerEmail: ownerEmail)
         observePush()
     }
 
@@ -137,8 +141,60 @@ final class FlightsViewModel: ObservableObject {
         }
     }
 
+    /// Live insertion of my flights. Fires when a flight is created on another
+    /// device (both create paths go through `publishFlightCreate`). Upserts by
+    /// `id` so the optimistic append in `addFlight` on THIS device doesn't double
+    /// up when its own create event arrives. Keeps the list sorted.
+    private func subscribeToCreates(ownerEmail: String) {
+        createSubscriptionTask?.cancel()
+        createSubscriptionTask = Task {
+            do {
+                let sequence = repo.subscribeToConnectionFlightCreates(viewerEmail: ownerEmail)
+                for try await event in sequence {
+                    guard case .data(let result) = event,
+                          let json = try? result.get(),
+                          let created = json.value(at: "onConnectionFlightCreate")?.asFlight
+                    else { continue }
+                    if let idx = flights.firstIndex(where: { $0.id == created.id }) {
+                        flights[idx] = created
+                    } else {
+                        flights.append(created)
+                        flights.sort { ($0.effectiveDeparture ?? .distantFuture) < ($1.effectiveDeparture ?? .distantFuture) }
+                    }
+                }
+            } catch {
+                // Subscriptions can drop; UI still works via manual reload.
+            }
+        }
+    }
+
+    /// Live removal of my flights. Fires when one of my flights is deleted on
+    /// another device or auto-pruned by the refresh Lambda (both go through
+    /// `publishFlightDelete`), so it disappears here without a manual reload.
+    /// Uses the viewer-scoped delete subscription (my email is always in my own
+    /// flights' `viewers`).
+    private func subscribeToDeletes(ownerEmail: String) {
+        deleteSubscriptionTask?.cancel()
+        deleteSubscriptionTask = Task {
+            do {
+                let sequence = repo.subscribeToConnectionFlightDeletes(viewerEmail: ownerEmail)
+                for try await event in sequence {
+                    guard case .data(let result) = event,
+                          let json = try? result.get(),
+                          let deleted = json.value(at: "onConnectionFlightDelete")?.asFlight
+                    else { continue }
+                    flights.removeAll { $0.id == deleted.id }
+                }
+            } catch {
+                // Subscriptions can drop; UI still works via manual reload.
+            }
+        }
+    }
+
     deinit {
         subscriptionTask?.cancel()
+        createSubscriptionTask?.cancel()
+        deleteSubscriptionTask?.cancel()
         if let pushObserver { NotificationCenter.default.removeObserver(pushObserver) }
     }
 }

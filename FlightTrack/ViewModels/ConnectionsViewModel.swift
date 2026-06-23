@@ -14,12 +14,16 @@ final class ConnectionsViewModel: ObservableObject {
     private var myEmail: String = ""
     private var myProfileId: String = ""
     private var subscriptionTask: Task<Void, Never>?
+    private var createSubscriptionTask: Task<Void, Never>?
+    private var deleteSubscriptionTask: Task<Void, Never>?
 
     func start(myEmail: String, myProfileId: String) {
         self.myEmail = myEmail
         self.myProfileId = myProfileId
         Task { await reload() }
         subscribeToConnectionFlights()
+        subscribeToConnectionFlightCreates()
+        subscribeToConnectionFlightDeletes()
     }
 
     /// Live updates for connections' flights via the viewer-scoped subscription.
@@ -54,7 +58,65 @@ final class ConnectionsViewModel: ObservableObject {
         }
     }
 
-    deinit { subscriptionTask?.cancel() }
+    /// Live insertion of connections' newly-added flights via the viewer-scoped
+    /// create subscription. Upsert into the right counterparty bucket so a flight
+    /// a connection just added appears without a reload.
+    private func subscribeToConnectionFlightCreates() {
+        createSubscriptionTask?.cancel()
+        let viewer = myEmail
+        createSubscriptionTask = Task {
+            do {
+                let sequence = repo.subscribeToConnectionFlightCreates(viewerEmail: viewer)
+                for try await event in sequence {
+                    guard case .data(let result) = event,
+                          let json = try? result.get(),
+                          let created = json.value(at: "onConnectionFlightCreate")?.asFlight
+                    else { continue }
+                    let owner = (created.ownerEmail ?? "").lowercased()
+                    guard owner != myEmail.lowercased() else { continue }
+                    var bucket = memberFlights[owner] ?? []
+                    if let idx = bucket.firstIndex(where: { $0.id == created.id }) {
+                        bucket[idx] = created
+                    } else {
+                        bucket.append(created)
+                    }
+                    memberFlights[owner] = bucket
+                }
+            } catch {
+                // Subscriptions can drop; screen still works via reload.
+            }
+        }
+    }
+
+    /// Live removal of connections' flights via the viewer-scoped delete
+    /// subscription. On each event, drop the matching flight from its
+    /// counterparty bucket so a deleted/pruned flight disappears without a reload.
+    private func subscribeToConnectionFlightDeletes() {
+        deleteSubscriptionTask?.cancel()
+        let viewer = myEmail
+        deleteSubscriptionTask = Task {
+            do {
+                let sequence = repo.subscribeToConnectionFlightDeletes(viewerEmail: viewer)
+                for try await event in sequence {
+                    guard case .data(let result) = event,
+                          let json = try? result.get(),
+                          let deleted = json.value(at: "onConnectionFlightDelete")?.asFlight
+                    else { continue }
+                    let owner = (deleted.ownerEmail ?? "").lowercased()
+                    guard owner != myEmail.lowercased() else { continue }
+                    memberFlights[owner]?.removeAll { $0.id == deleted.id }
+                }
+            } catch {
+                // Subscriptions can drop; screen still works via reload.
+            }
+        }
+    }
+
+    deinit {
+        subscriptionTask?.cancel()
+        createSubscriptionTask?.cancel()
+        deleteSubscriptionTask?.cancel()
+    }
 
     func reload() async {
         isLoading = true

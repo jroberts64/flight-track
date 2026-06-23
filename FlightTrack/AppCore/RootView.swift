@@ -32,6 +32,8 @@ struct MainTabView: View {
                 .tabItem { Label("My Flights", systemImage: "airplane") }
             ConnectionsView()
                 .tabItem { Label("Connections", systemImage: "person.2") }
+            CodeGroupsView()
+                .tabItem { Label("Codes", systemImage: "key.fill") }
             SettingsView()
                 .tabItem { Label("Settings", systemImage: "gear") }
         }

@@ -31,15 +31,26 @@ extension JSONValue {
 
     var dateValue: Date? {
         guard let s = stringValue else { return nil }
-        return ISO8601DateFormatter.flexible.date(from: s)
+        // AeroAPI emits ISO8601 without fractional seconds (e.g.
+        // "2026-06-21T14:30:00Z"); AppSync preserves whatever it stored, so we
+        // may also see fractional seconds. Try both — a parser configured with
+        // .withFractionalSeconds will REJECT a string that lacks them.
+        return ISO8601DateFormatter.withFraction.date(from: s)
+            ?? ISO8601DateFormatter.noFraction.date(from: s)
     }
 }
 
 extension ISO8601DateFormatter {
     /// AeroAPI / AppSync may or may not include fractional seconds.
-    static let flexible: ISO8601DateFormatter = {
+    static let withFraction: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
+    static let noFraction: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
         return f
     }()
 }
@@ -120,6 +131,35 @@ extension JSONValue {
             note: value(at: "note")?.stringValue
         )
     }
+
+    var asCodeGroup: CodeGroup? {
+        guard let id = value(at: "id")?.stringValue,
+              let ownerEmail = value(at: "ownerEmail")?.stringValue,
+              let name = value(at: "name")?.stringValue else { return nil }
+        return CodeGroup(
+            id: id,
+            ownerEmail: ownerEmail,
+            name: name,
+            memberEmails: value(at: "memberEmails")?.arrayValue?.compactMap { $0.stringValue } ?? []
+        )
+    }
+
+    var asServiceLink: ServiceLink? {
+        guard let id = value(at: "id")?.stringValue,
+              let ownerEmail = value(at: "ownerEmail")?.stringValue,
+              let groupId = value(at: "groupId")?.stringValue,
+              let serviceName = value(at: "serviceName")?.stringValue else { return nil }
+        let enabled: Bool
+        if case let .boolean(b)? = self.value(at: "enabled") { enabled = b } else { enabled = true }
+        return ServiceLink(
+            id: id,
+            ownerEmail: ownerEmail,
+            groupId: groupId,
+            serviceName: serviceName,
+            matchRules: value(at: "matchRules")?.stringValue,
+            enabled: enabled
+        )
+    }
 }
 
 // MARK: - domain -> GraphQL input
@@ -142,7 +182,7 @@ extension Flight {
     /// live-status fields, as individual arguments (not an input object). Nils
     /// are dropped so the resolver does a partial update.
     var publishUpdateVars: [String: Any] {
-        let iso = ISO8601DateFormatter.flexible
+        let iso = ISO8601DateFormatter.withFraction
         let vars: [String: Any?] = [
             "id": id,
             "status": status.rawValue,
@@ -162,7 +202,7 @@ extension Flight {
     }
 
     private var baseInput: [String: Any?] {
-        let iso = ISO8601DateFormatter.flexible
+        let iso = ISO8601DateFormatter.withFraction
         return [
             "profileId": profileId,
             "ownerEmail": ownerEmail,

@@ -104,16 +104,39 @@ final class FlightRepository: ObservableObject {
         return items.compactMap { $0.asFlight }.sorted { ($0.effectiveDeparture ?? .distantFuture) < ($1.effectiveDeparture ?? .distantFuture) }
     }
 
+    /// Creates a flight via the custom `publishFlightCreate` mutation (NOT the
+    /// generated `createFlight`), so the viewer-aware `onConnectionFlightCreate`
+    /// subscription fires and the new flight appears live on connections'
+    /// screens. Args are the flat field set (`createInput` == baseInput minus
+    /// nils), matching the mutation's individual arguments.
     func createFlight(_ flight: Flight) async throws -> Flight {
         let doc = """
-        mutation Create($input: CreateFlightInput!) {
-          createFlight(input: $input) { \(Self.flightFields) }
+        mutation Create(
+          $profileId: ID!, $ownerEmail: String!, $flightNumber: String!,
+          $faFlightId: String, $departureDate: String!, $originIata: String!,
+          $destinationIata: String!, $scheduledOut: String, $scheduledIn: String,
+          $estimatedOut: String, $estimatedIn: String, $actualOut: String,
+          $actualIn: String, $status: String, $originGate: String,
+          $destinationGate: String, $originTerminal: String, $destinationTerminal: String,
+          $progressPercent: Int, $lastRefreshedAt: String, $note: String,
+          $viewers: [String]
+        ) {
+          publishFlightCreate(
+            profileId: $profileId, ownerEmail: $ownerEmail, flightNumber: $flightNumber,
+            faFlightId: $faFlightId, departureDate: $departureDate, originIata: $originIata,
+            destinationIata: $destinationIata, scheduledOut: $scheduledOut, scheduledIn: $scheduledIn,
+            estimatedOut: $estimatedOut, estimatedIn: $estimatedIn, actualOut: $actualOut,
+            actualIn: $actualIn, status: $status, originGate: $originGate,
+            destinationGate: $destinationGate, originTerminal: $originTerminal,
+            destinationTerminal: $destinationTerminal, progressPercent: $progressPercent,
+            lastRefreshedAt: $lastRefreshedAt, note: $note, viewers: $viewers
+          ) { \(Self.flightFields) }
         }
         """
         let result: GraphQLResponse<JSONValue> = try await Amplify.API.mutate(
-            request: GQL.userPool(doc, variables: ["input": flight.createInput])
+            request: GQL.userPool(doc, variables: flight.createInput)
         )
-        guard let created = try result.get().value(at: "createFlight")?.asFlight else {
+        guard let created = try result.get().value(at: "publishFlightCreate")?.asFlight else {
             throw RepoError.malformedResponse
         }
         return created
@@ -148,14 +171,18 @@ final class FlightRepository: ObservableObject {
         )
     }
 
+    /// Deletes a flight via the custom `publishFlightDelete` mutation (NOT the
+    /// generated `deleteFlight`), so the viewer-aware `onConnectionFlightDelete`
+    /// subscription fires and the row disappears live from connections' screens.
+    /// Selects `viewers` so the subscription's viewer filter has a field to match.
     func deleteFlight(id: String) async throws {
         let doc = """
-        mutation Delete($input: DeleteFlightInput!) {
-          deleteFlight(input: $input) { id }
+        mutation Delete($id: ID!) {
+          publishFlightDelete(id: $id) { id ownerEmail flightNumber viewers }
         }
         """
         _ = try await Amplify.API.mutate(
-            request: GQL.userPool(doc, variables: ["input": ["id": id]])
+            request: GQL.userPool(doc, variables: ["id": id])
         )
     }
 
@@ -246,6 +273,36 @@ final class FlightRepository: ObservableObject {
         let doc = """
         subscription OnConnChange($viewerEmail: String!) {
           onConnectionFlightChange(viewerEmail: $viewerEmail) { \(Self.flightFields) }
+        }
+        """
+        return Amplify.API.subscribe(
+            request: GQL.userPool(doc, variables: ["viewerEmail": viewerEmail.lowercased()])
+        )
+    }
+
+    /// Viewer-scoped live CREATE subscription via `onConnectionFlightCreate`
+    /// (bound to `publishFlightCreate`). Fires when a new flight I can view —
+    /// mine or a connection's — is created, so the UI can insert it without a
+    /// reload. Delivers the new Flight; the view models add it by `id`.
+    func subscribeToConnectionFlightCreates(viewerEmail: String) -> AmplifyAsyncThrowingSequence<GraphQLSubscriptionEvent<JSONValue>> {
+        let doc = """
+        subscription OnConnCreate($viewerEmail: String!) {
+          onConnectionFlightCreate(viewerEmail: $viewerEmail) { \(Self.flightFields) }
+        }
+        """
+        return Amplify.API.subscribe(
+            request: GQL.userPool(doc, variables: ["viewerEmail": viewerEmail.lowercased()])
+        )
+    }
+
+    /// Viewer-scoped live DELETE subscription via `onConnectionFlightDelete`
+    /// (bound to `publishFlightDelete`). Fires when any flight I can view — mine
+    /// or a connection's — is deleted, so the UI can remove it without a reload.
+    /// Delivers the deleted Flight; the view models drop it by `id`.
+    func subscribeToConnectionFlightDeletes(viewerEmail: String) -> AmplifyAsyncThrowingSequence<GraphQLSubscriptionEvent<JSONValue>> {
+        let doc = """
+        subscription OnConnDelete($viewerEmail: String!) {
+          onConnectionFlightDelete(viewerEmail: $viewerEmail) { \(Self.flightFields) }
         }
         """
         return Amplify.API.subscribe(
