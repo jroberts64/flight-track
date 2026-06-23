@@ -131,6 +131,35 @@ extension JSONValue {
             note: value(at: "note")?.stringValue
         )
     }
+
+    var asCodeGroup: CodeGroup? {
+        guard let id = value(at: "id")?.stringValue,
+              let ownerEmail = value(at: "ownerEmail")?.stringValue,
+              let name = value(at: "name")?.stringValue else { return nil }
+        return CodeGroup(
+            id: id,
+            ownerEmail: ownerEmail,
+            name: name,
+            memberEmails: value(at: "memberEmails")?.arrayValue?.compactMap { $0.stringValue } ?? []
+        )
+    }
+
+    var asServiceLink: ServiceLink? {
+        guard let id = value(at: "id")?.stringValue,
+              let ownerEmail = value(at: "ownerEmail")?.stringValue,
+              let groupId = value(at: "groupId")?.stringValue,
+              let serviceName = value(at: "serviceName")?.stringValue else { return nil }
+        let enabled: Bool
+        if case let .boolean(b)? = self.value(at: "enabled") { enabled = b } else { enabled = true }
+        return ServiceLink(
+            id: id,
+            ownerEmail: ownerEmail,
+            groupId: groupId,
+            serviceName: serviceName,
+            matchRules: value(at: "matchRules")?.stringValue,
+            enabled: enabled
+        )
+    }
 }
 
 // MARK: - domain -> GraphQL input

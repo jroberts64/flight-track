@@ -129,6 +129,10 @@ CLI per that doc. Requires the iOS 26.5 simulator runtime.
 - **UserProfile** — one per account (display name, optional home airport).
 - **Flight** — a flight owned by one user (flight number, date, route, live status snapshot).
 - **FamilyLink** — connects two accounts so they can see each other's flights.
+- **CodeGroup** — a named group of connections (e.g. "Family") that receive shared
+  service codes. Owner-created; members listed in `memberEmails`.
+- **ServiceLink** — maps a service (HBO Max, Netflix, …) to a `CodeGroup` plus the rules
+  used to recognize that service's code emails and extract the code (`matchRules` JSON).
 
 Authorization: a user owns their own flights; family members linked via an accepted
 `FamilyLink` get read access. See `amplify/data/resource.ts`.
@@ -148,7 +152,12 @@ How it works:
 
 ### Enabling push (needs an Apple Developer account)
 
-Push is **off by default** so the rest of the app deploys without Apple setup.
+Push is **on by default** — the backend provisions the SNS platform app on every
+deploy unless you set `ENABLE_PUSH=false`. Because it needs the APNs `.p8` key,
+the deploy shell must export the APNs vars (the local convention is
+`source ~/.apple-developer/flighttrack.env`). To deploy **without** push (e.g. a
+CI run lacking the APNs secrets), set `ENABLE_PUSH=false`.
+
 To turn it on:
 
 1. **Apple Developer account** ($99/yr). In the developer portal:
@@ -174,6 +183,59 @@ To turn it on:
 > Remote push requires the production APNs environment for App Store / TestFlight
 > builds and the sandbox environment for development builds — set `APNS_SANDBOX`
 > accordingly. A device registered against one won't receive from the other.
+
+## Code sharing (forward a service code to a group)
+
+Mimics an email-forwarding rule: forward a service's login/OTP code email to a single
+address and the backend pushes the code to a group of connections.
+
+How it works:
+- You forward the code email to **`decode@app.jack-roberts.com`**.
+- **AWS SES inbound** (on the `app.jack-roberts.com` subdomain) writes the raw email to
+  an S3 bucket; the object-created event triggers the **`email-ingest` Lambda**.
+- The Lambda validates the sender is a known app user (by `From:`), matches the
+  forwarder's `ServiceLink` rules to identify the service, extracts the code, stores a
+  short-lived "latest code" (`CodeEvents` table, 15-min TTL), and pushes it to the
+  linked `CodeGroup` (owner + members) reusing the same APNs path as flight pushes.
+- In the app, the **Codes** tab manages groups and service links and shows the
+  forwarding address.
+
+> **Security:** routing trusts the `From:` address, which is forgeable — acceptable for
+> a private family app. Codes are secrets: the raw email rests in S3 (encrypted, 1-day
+> lifecycle), the latest code in `CodeEvents` (15-min TTL), and the Lambda never logs the
+> code itself. The code is shown in the push alert body (lock-screen visible) by design.
+
+### Inbound-email setup (manual, one-time — not in CloudFormation)
+
+The bucket, `CodeEvents` table, and `email-ingest` Lambda are IaC (`amplify/backend.ts`).
+These DNS/SES steps are done **out-of-band** (account `019135476568`, `us-east-1`):
+
+1. **Verify the SES subdomain identity** for `app.jack-roberts.com`:
+   ```bash
+   aws ses verify-domain-dkim --domain app.jack-roberts.com --region us-east-1   # returns 3 DKIM tokens
+   aws ses verify-domain-identity --domain app.jack-roberts.com --region us-east-1
+   ```
+2. **DNS in Route 53** (zone `jack-roberts.com` / `Z2YKRD5BS6GZZ6`) — leave the **apex MX
+   (WorkMail) untouched**, add for the subdomain only:
+   - 3 × DKIM CNAME: `<token>._domainkey.app.jack-roberts.com → <token>.dkim.amazonses.com`
+   - MX: `app.jack-roberts.com → 10 inbound-smtp.us-east-1.amazonaws.com`
+3. **SES receipt rule — add into the EXISTING active set, do NOT activate a new one.**
+   WorkMail owns the single active rule set (`INBOUND_MAIL`); activating a competing set
+   would break WorkMail mail for `jack-roberts.com`. Add the `decode@` → S3 rule into it:
+   ```bash
+   aws ses create-receipt-rule --region us-east-1 --rule-set-name INBOUND_MAIL \
+     --after "m-8e718c4f48b447ddac539f038aa575fe" \
+     --rule '{"Name":"flighttrack-decode","Enabled":true,"ScanEnabled":true,"TlsPolicy":"Optional","Recipients":["decode@app.jack-roberts.com"],"Actions":[{"S3Action":{"BucketName":"<inbound-bucket>","ObjectKeyPrefix":"inbound/"}}]}'
+   ```
+   > **Caveat:** because this rule lives inside WorkMail's `INBOUND_MAIL` set (not
+   > CloudFormation), `ampx sandbox` does not manage it. If WorkMail ever rewrites its
+   > rule set, re-add this rule.
+
+### Testing the ingest without real email
+
+Upload a sample `.eml` (valid app-user `From:`, a matching service body) to
+`s3://<inbound-bucket>/inbound/` and watch the `email-ingest` CloudWatch logs — it logs
+the matched service + recipient count (never the code).
 
 ## Hardening (before real use)
 

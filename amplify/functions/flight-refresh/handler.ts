@@ -1,22 +1,17 @@
 import type { ScheduledHandler } from 'aws-lambda';
-import {
-  SNSClient,
-  PublishCommand,
-  CreatePlatformEndpointCommand,
-} from '@aws-sdk/client-sns';
+import { SNSClient } from '@aws-sdk/client-sns';
 import {
   DynamoDBClient,
 } from '@aws-sdk/client-dynamodb';
 import {
   DynamoDBDocumentClient,
   ScanCommand,
-  QueryCommand,
-  UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { Amplify } from 'aws-amplify';
 import { generateClient } from 'aws-amplify/data';
 import { getAmplifyDataClientConfig } from '@aws-amplify/backend/function/runtime';
 import { env } from '$amplify/env/flight-refresh';
+import { endpointsForEmails, publish } from '../shared/push';
 
 /**
  * Scheduled refresher. Reads flights directly from DynamoDB (the model tables),
@@ -60,6 +55,11 @@ const LANDED_TTL_HOURS = parseInt(process.env.LANDED_TTL_HOURS ?? '12', 10);
 // this gate is only for push notifications. Overridable via env.
 const THRESHOLD_MIN = parseInt(process.env.DELAY_THRESHOLD_MIN ?? '10', 10);
 const PLATFORM_APP_ARN = process.env.PLATFORM_APP_ARN; // unset until push is enabled
+const pushCfg = {
+  deviceTable: DEVICE_TABLE,
+  gsiName: process.env.DEVICE_TOKEN_BY_EMAIL!,
+  platformAppArn: PLATFORM_APP_ARN,
+};
 
 export const handler: ScheduledHandler = async () => {
   const flights = await scanAll(FLIGHT_TABLE);
@@ -154,7 +154,7 @@ async function refreshOne(flight: Record<string, any>): Promise<void> {
   const message = `${flight.flightNumber}: ${events.join('; ')}`;
   const recipients = await recipientsFor(flight);
   await Promise.allSettled(
-    recipients.map((arn) => publish(arn, flight.flightNumber, message, flight.id))
+    recipients.map((arn) => publish(sns, arn, flight.flightNumber, message, { flightId: flight.id }))
   );
   console.log(`pushed "${message}" to ${recipients.length} endpoint(s)`);
 }
@@ -301,81 +301,9 @@ async function recipientsFor(flight: Record<string, any>): Promise<string[]> {
     }
   }
 
-  const arns: string[] = [];
-  for (const email of emails) {
-    const res = await ddb
-      .send(
-        new QueryCommand({
-          TableName: DEVICE_TABLE,
-          IndexName: process.env.DEVICE_TOKEN_BY_EMAIL,
-          KeyConditionExpression: 'ownerEmail = :e',
-          ExpressionAttributeValues: { ':e': email },
-        })
-      )
-      .catch((err) => {
-        console.error(`device lookup failed for ${email}:`, err);
-        return null;
-      });
-    for (const item of res?.Items ?? []) {
-      const arn = await ensureEndpoint(item);
-      if (arn) arns.push(arn);
-    }
-  }
-  return arns;
-}
-
-/**
- * Returns the device's SNS endpoint ARN, creating it lazily on first use.
- * The iOS app writes DeviceToken rows with no endpoint; we mint one here from
- * the raw APNs token, persist it, and reuse it on subsequent runs.
- */
-async function ensureEndpoint(device: Record<string, any>): Promise<string | null> {
-  if (device.snsEndpointArn) return device.snsEndpointArn as string;
-  if (!PLATFORM_APP_ARN || !device.token) return null;
-  try {
-    const created = await sns.send(
-      new CreatePlatformEndpointCommand({
-        PlatformApplicationArn: PLATFORM_APP_ARN,
-        Token: device.token,
-        CustomUserData: device.ownerEmail,
-      })
-    );
-    const arn = created.EndpointArn!;
-    await ddb.send(
-      new UpdateCommand({
-        TableName: DEVICE_TABLE,
-        Key: { id: device.id },
-        UpdateExpression: 'SET snsEndpointArn = :a, updatedAt = :u',
-        ExpressionAttributeValues: { ':a': arn, ':u': new Date().toISOString() },
-      })
-    );
-    return arn;
-  } catch (e) {
-    console.error(`failed to create endpoint for ${device.ownerEmail}:`, e);
-    return null;
-  }
-}
-
-async function publish(
-  endpointArn: string,
-  title: string,
-  body: string,
-  flightId?: string
-): Promise<void> {
-  const apns = JSON.stringify({
-    // `content-available: 1` lets iOS wake the app in the background to refresh
-    // before the user opens it; the alert still shows. `flightId` lets the app
-    // refresh just the changed flight (falls back to a full reload if absent).
-    aps: { alert: { title, body }, sound: 'default', 'content-available': 1 },
-    flightId,
-  });
-  await sns.send(
-    new PublishCommand({
-      TargetArn: endpointArn,
-      MessageStructure: 'json',
-      Message: JSON.stringify({ default: body, APNS: apns, APNS_SANDBOX: apns }),
-    })
-  );
+  // Resolve each recipient email to its device SNS endpoint(s) via the shared
+  // push helper (queries the DeviceToken GSI + mints endpoints lazily).
+  return endpointsForEmails(ddb, sns, emails, pushCfg);
 }
 
 // --- AeroAPI (shares the same upstream as aeroapi-lookup) -----------------

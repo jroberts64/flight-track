@@ -137,6 +137,44 @@ const schema = a.schema({
     // backend.ts), then writes the ARN back.
     .authorization((allow) => [allow.owner()]),
 
+  // A named group of connections that receive shared service codes (e.g.
+  // "Family" = [wife, kids]). Owner-created from accepted connections; the
+  // owner links services to it (ServiceLink) and members receive code pushes.
+  // memberEmails mirrors the Flight.viewers pattern: it both records recipients
+  // and (via ownersDefinedIn) lets a member read groups they belong to.
+  CodeGroup: a
+    .model({
+      ownerEmail: a.email().required(),
+      name: a.string().required(), // "Family"
+      memberEmails: a.string().array(), // accepted-connection emails who receive codes
+    })
+    .authorization((allow) => [
+      allow.ownerDefinedIn('ownerEmail').identityClaim('email'),
+      // Members may READ groups they're in (so a member screen can show
+      // "you receive codes from Jack"). They never write.
+      allow.ownersDefinedIn('memberEmails').identityClaim('email').to(['read']),
+    ]),
+
+  // Maps a service (HBO Max, Netflix, …) to a CodeGroup, plus the rules used to
+  // recognize that service's code emails and extract the code. Owner-private:
+  // it holds matching rules and is read only by the owner (app) and the
+  // email-ingest Lambda (direct DynamoDB IAM access, granted in backend.ts).
+  ServiceLink: a
+    .model({
+      ownerEmail: a.email().required(),
+      groupId: a.id().required(), // FK to CodeGroup; joined manually by app + Lambda
+      serviceName: a.string().required(), // "HBO Max"
+      // JSON: { fromContains, subjectContains, codeRegex }. Authored from a
+      // preset or a custom rule in the app.
+      matchRules: a.string(),
+      enabled: a.boolean(),
+    })
+    // Lets the email-ingest Lambda query a sender's links by ownerEmail.
+    .secondaryIndexes((index) => [index('ownerEmail')])
+    .authorization((allow) => [
+      allow.ownerDefinedIn('ownerEmail').identityClaim('email'),
+    ]),
+
   // Custom flight-update mutation. Amplify's generated `updateFlight` cannot
   // drive a viewer-aware live subscription (its onUpdateFlight delivers to the
   // OWNER only — verified empirically). So all flight writes go through this

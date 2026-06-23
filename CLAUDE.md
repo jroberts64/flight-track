@@ -27,15 +27,17 @@ real-time family sync run on AWS Amplify Gen 2.
 | Path | Responsibility |
 |------|----------------|
 | `amplify/auth/resource.ts` | Cognito config (email sign-in). |
-| `amplify/data/resource.ts` | Data model + authorization: `UserProfile`, `Flight`, `Connection`. Single source of truth for the backend schema. |
-| `amplify/backend.ts` | Backend entrypoint: wires auth + data + the AeroAPI Lambda, and provisions the DynamoDB cache table (TTL) granted to the Lambda. |
+| `amplify/data/resource.ts` | Data model + authorization: `UserProfile`, `Flight`, `Connection`, `CodeGroup`, `ServiceLink`. Single source of truth for the backend schema. |
+| `amplify/backend.ts` | Backend entrypoint: wires auth + data + the Lambdas, provisions the AeroAPI cache + `CodeEvents` (TTL) tables, the inbound-email S3 bucket + S3→Lambda trigger, and the SNS push stack (on unless `ENABLE_PUSH=false`). |
 | `amplify/functions/aeroapi-lookup/` | Lambda that proxies FlightAware AeroAPI server-side (key as an Amplify secret) with a DynamoDB cache. Exposed as the `lookupFlight` AppSync query. Pinned to the **data** stack (`resourceGroupName: 'data'`) to avoid a circular dependency. |
-| `amplify/functions/flight-refresh/` | Scheduled (30m) Lambda. Refreshes near-window flights via AeroAPI, diffs, updates, and pushes change alerts via SNS. Creates SNS endpoints lazily. |
-| `FlightTrack/App/` | App entrypoint (`FlightTrackApp`), `AppDelegate` (APNs token via `@UIApplicationDelegateAdaptor`), `RootView` (auth gate + tabs), `SessionStore` (per-session identity + profile id; sets push owner email). |
-| `FlightTrack/Models/` | Domain models (`Flight`/`FlightStatus`, `UserProfile`/`Connection`) + AeroAPI decodables. Decoupled from Amplify codegen on purpose. |
-| `FlightTrack/Services/` | `AmplifyBootstrap`, `AuthService` (Cognito), `FlightRepository` (GraphQL CRUD + real-time subscription), `AeroAPIClient` (calls the `lookupFlight` backend query — NOT FlightAware directly), `PushService` (APNs permission + writes a DeviceToken row), `JSONMapping` (JSONValue ↔ domain). |
-| `FlightTrack/ViewModels/` | `FlightsViewModel`, `ConnectionsViewModel`. |
-| `FlightTrack/Views/` | SwiftUI screens: auth, my-flights + add-flight, connections, flight row. |
+| `amplify/functions/flight-refresh/` | Scheduled (30m) Lambda. Refreshes near-window flights via AeroAPI, diffs, updates, and pushes change alerts via SNS. Uses the shared push helper. |
+| `amplify/functions/email-ingest/` | S3-triggered Lambda. Parses a forwarded code email, validates the sender is an app user, matches a `ServiceLink`, extracts the code, stores an ephemeral `CodeEvents` row (TTL), and pushes to the linked `CodeGroup`. Pinned to **data** (`resourceGroupName: 'data'`) so the bucket + lambda + tables co-locate (else S3-notification↔lambda is a circular dep). |
+| `amplify/functions/shared/push.ts` | Shared APNs helpers (`ensureEndpoint`, `endpointsForEmails`, `publish`) used by both `flight-refresh` and `email-ingest`. `publish` takes a generic payload (`{ flightId }` or `{ kind:'code', … }`). |
+| `FlightTrack/App/` | App entrypoint (`FlightTrackApp`), `AppDelegate` (APNs token + routes `kind:"code"` pushes to `.codePushReceived`, else `.flightPushReceived`), `RootView` (auth gate + 4 tabs), `SessionStore`. |
+| `FlightTrack/Models/` | Domain models (`Flight`/`FlightStatus`, `UserProfile`/`Connection`, `CodeGroup`/`ServiceLink`/`ServicePreset`) + AeroAPI decodables. Decoupled from Amplify codegen on purpose. |
+| `FlightTrack/Services/` | `AmplifyBootstrap`, `AuthService` (Cognito), `FlightRepository` (flight/connection CRUD + subscriptions), `CodeGroupRepository` (code-group + service-link CRUD), `AeroAPIClient`, `PushService`, `JSONMapping` (JSONValue ↔ domain). |
+| `FlightTrack/ViewModels/` | `FlightsViewModel`, `ConnectionsViewModel`, `CodeGroupsViewModel`. |
+| `FlightTrack/Views/` | SwiftUI screens: auth, my-flights + add-flight, connections, flight row, codes (groups + service links). |
 | `FlightTrack/Config/` | `SETUP.md` (Xcode project creation + secret setup). |
 | `deploy/` | `github-oidc.yaml` (CI deploy role), `bootstrap-oidc.sh` (one-time role create). |
 | `.github/workflows/deploy-backend.yml` | CI: `ampx pipeline-deploy` on push to main via OIDC. |
@@ -78,6 +80,16 @@ shakeout. "Verify" the backend means: `npx ampx sandbox --once` deploys clean.
 - **DeviceToken** — one per device (ownerEmail, APNs token, snsEndpointArn, platform).
   Owner-writable; the app creates it, the refresh Lambda fills in `snsEndpointArn`
   lazily. GSI on `ownerEmail` (`deviceTokensByOwnerEmail`) for recipient lookup.
+- **CodeGroup** — a named group of connections that receive shared service codes
+  (ownerEmail, name, `memberEmails`). Owner CRUD; members get READ via
+  `ownersDefinedIn('memberEmails')`. Delivery is push, so (unlike Flight) there's no
+  live cross-account subscription — the app uses the generated CRUD mutations.
+- **ServiceLink** — maps a service to a `CodeGroup` (ownerEmail, groupId, serviceName,
+  `matchRules` JSON, enabled). Owner-private. GSI on `ownerEmail`
+  (`serviceLinksByOwnerEmail`) so `email-ingest` finds a sender's links.
+- **CodeEvents** — custom (non-model) DynamoDB table with TTL, holding the ephemeral
+  "latest code" per `groupId#serviceName` (~15 min). Kept out of the AppSync graph so
+  the secret isn't queryable; written by `email-ingest`.
 
 **Cross-account read = the `viewers` list.** Each user maintains their OWN flights'
 viewers (owner auth prevents touching others'). `ConnectionsViewModel.reconcileMyViewers()`
@@ -91,7 +103,24 @@ Connections screen) after acceptance — see memory `family-sharing-verified`.
 **Lambda ↔ data access:** the push Lambdas read/write model tables via **direct
 DynamoDB IAM grants** in `backend.ts` (not the data client). A function bound as an
 AppSync resolver (e.g. `aeroapi-lookup`) must set `resourceGroupName: 'data'` or it
-creates a circular dependency between the data and function nested stacks.
+creates a circular dependency between the data and function nested stacks. The same
+applies to `email-ingest`: its S3 bucket triggers it AND it reads model tables, so the
+bucket + lambda + tables must be **co-located in the data stack** (lambda pinned to
+`resourceGroupName: 'data'`, bucket created in `ingestLambda.stack`) — otherwise the
+S3-notification ↔ lambda references cycle across nested stacks (aws-cdk#5760).
+
+**Push is on by default.** `backend.ts` provisions the SNS platform app unless
+`ENABLE_PUSH=false`; the deploy shell must export the APNs vars (local convention:
+`source ~/.apple-developer/flighttrack.env`). See memory `cli-device-build` /
+`flight-track-project` and the README "Push notifications".
+
+**Inbound email (code sharing).** SES receives `decode@app.jack-roberts.com` → S3 →
+`email-ingest`. The SES identity + DKIM + subdomain MX live in Route 53 (apex MX stays
+on WorkMail). CRITICAL: WorkMail owns the single ACTIVE SES receipt rule set
+(`INBOUND_MAIL`); the `decode@` → S3 rule is added INTO that set out-of-band (CLI), not
+via CloudFormation — activating a competing set would break WorkMail mail. So `ampx
+sandbox` does not manage that rule; re-add it if WorkMail rewrites its set. Full setup
+steps are in the README "Code sharing".
 
 ## Conventions
 

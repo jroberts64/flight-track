@@ -5,6 +5,10 @@ extension Notification.Name {
     /// Posted when a flight-change push is received (foreground, background, or
     /// tapped). `userInfo["flightId"]` holds the changed flight's id when known.
     static let flightPushReceived = Notification.Name("flightPushReceived")
+
+    /// Posted when a shared-service-code push is received. `userInfo` holds
+    /// `service`, `group`, and `code` (the payload carries `kind == "code"`).
+    static let codePushReceived = Notification.Name("codePushReceived")
 }
 
 /// SwiftUI apps still need a UIApplicationDelegate to receive the APNs device
@@ -40,7 +44,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification
     ) async -> UNNotificationPresentationOptions {
-        postFlightPush(notification.request.content.userInfo)
+        route(notification.request.content.userInfo)
         return [.banner, .sound, .list]
     }
 
@@ -49,7 +53,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse
     ) async {
-        postFlightPush(response.notification.request.content.userInfo)
+        route(response.notification.request.content.userInfo)
     }
 
     // Silent/background delivery (content-available): wake, refresh, report.
@@ -57,11 +61,22 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         _ application: UIApplication,
         didReceiveRemoteNotification userInfo: [AnyHashable: Any]
     ) async -> UIBackgroundFetchResult {
-        postFlightPush(userInfo)
+        route(userInfo)
         return .newData
     }
 
-    private func postFlightPush(_ userInfo: [AnyHashable: Any]) {
+    /// Routes an incoming push to the right NotificationCenter event based on
+    /// its `kind`. Code pushes carry `kind == "code"`; everything else is a
+    /// flight change (the original payload had no `kind`).
+    private func route(_ userInfo: [AnyHashable: Any]) {
+        if (userInfo["kind"] as? String) == "code" {
+            var info: [String: Any] = [:]
+            if let service = userInfo["service"] as? String { info["service"] = service }
+            if let group = userInfo["group"] as? String { info["group"] = group }
+            if let code = userInfo["code"] as? String { info["code"] = code }
+            NotificationCenter.default.post(name: .codePushReceived, object: nil, userInfo: info)
+            return
+        }
         var info: [String: Any] = [:]
         if let flightId = userInfo["flightId"] as? String { info["flightId"] = flightId }
         NotificationCenter.default.post(name: .flightPushReceived, object: nil, userInfo: info)

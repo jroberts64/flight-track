@@ -1,14 +1,21 @@
 import { defineBackend } from '@aws-amplify/backend';
 import {
+  Duration,
   aws_dynamodb as dynamodb,
   aws_iam as iam,
+  aws_s3 as s3,
+  aws_s3_notifications as s3n,
   custom_resources as cr,
 } from 'aws-cdk-lib';
 import { auth } from './auth/resource';
 import { data } from './data/resource';
 import { aeroapiLookup } from './functions/aeroapi-lookup/resource';
 import { flightRefresh } from './functions/flight-refresh/resource';
+import { emailIngest } from './functions/email-ingest/resource';
 import { preTokenGeneration } from './auth/pre-token-generation/resource';
+
+/** Inbound address codes are forwarded to (SES inbound on the app subdomain). */
+const INBOUND_RECIPIENT = 'decode@app.jack-roberts.com';
 
 /**
  * FlightTrack backend.
@@ -31,6 +38,7 @@ const backend = defineBackend({
   data,
   aeroapiLookup,
   flightRefresh,
+  emailIngest,
   preTokenGeneration,
 });
 
@@ -67,9 +75,13 @@ const tables = backend.data.resources.tables;
 const flightTable = tables['Flight'];
 const deviceTable = tables['DeviceToken'];
 const connectionTable = tables['Connection'];
+const userProfileTable = tables['UserProfile'];
+const codeGroupTable = tables['CodeGroup'];
+const serviceLinkTable = tables['ServiceLink'];
 
-// The GSI name Amplify generates for DeviceToken.ownerEmail secondary index.
+// The GSI names Amplify generates for the *.ownerEmail secondary indexes.
 const DEVICE_BY_EMAIL_GSI = 'deviceTokensByOwnerEmail';
+const SERVICE_LINK_BY_EMAIL_GSI = 'serviceLinksByOwnerEmail';
 
 backend.flightRefresh.addEnvironment('FLIGHT_TABLE', flightTable.tableName);
 backend.flightRefresh.addEnvironment('DEVICE_TOKEN_TABLE', deviceTable.tableName);
@@ -96,23 +108,111 @@ backend.flightRefresh.resources.lambda.addToRolePolicy(
   })
 );
 
-// --- SNS push (provisioned only when ENABLE_PUSH=true at deploy time) ------
-// Push needs an Apple Developer account + an APNs auth key (.p8). Until you have
-// those, deploy WITHOUT push: the rest of the app works and DeviceToken rows are
-// stored without an SNS endpoint (PLATFORM_APP_ARN unset). When ready:
+// --- Inbound email → code push (SES inbound → S3 → email-ingest Lambda) ----
+// SES inbound on the app.jack-roberts.com subdomain writes forwarded code
+// emails to S3; the object-created event triggers email-ingest, which parses
+// the email, validates the sender, matches a ServiceLink, extracts the code,
+// and pushes it to the linked CodeGroup. The subdomain MX record + SES identity
+// verification + activating the receipt rule set are MANUAL DNS/SES steps (see
+// the plan / README) — CloudFormation owns only the bucket, rule, table, grants.
+// All inbound-email infra lives in the DATA stack — same as the model tables
+// and the email-ingest lambda (pinned via resourceGroupName:'data'). Keeping
+// bucket + lambda + tables co-located means the S3 ObjectCreated notification
+// and the lambda's read-grant/env never cross a nested-stack boundary, which
+// would be a circular dependency (aws-cdk#5760). Drop the separate stack.
+const ingestLambda = backend.emailIngest.resources.lambda;
+const ingestScope = ingestLambda.stack; // the data nested stack
+
+// Ephemeral "latest code" store. Custom table (not an Amplify model) so we get
+// DynamoDB TTL and keep the secret out of the AppSync-queryable graph.
+const codeEventsTable = new dynamodb.Table(ingestScope, 'CodeEventsTable', {
+  partitionKey: { name: 'key', type: dynamodb.AttributeType.STRING },
+  billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+  timeToLiveAttribute: 'ttl',
+});
+
+// Raw inbound emails. Codes rest here briefly: encrypt, block public access,
+// and expire objects after 1 day to minimize a secret's lifetime at rest.
+const inboundBucket = new s3.Bucket(ingestScope, 'InboundEmailBucket', {
+  encryption: s3.BucketEncryption.S3_MANAGED,
+  blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+  enforceSSL: true,
+  lifecycleRules: [{ expiration: Duration.days(1) }],
+});
+// SES must be allowed to write inbound messages to the bucket.
+inboundBucket.addToResourcePolicy(
+  new iam.PolicyStatement({
+    principals: [new iam.ServicePrincipal('ses.amazonaws.com')],
+    actions: ['s3:PutObject'],
+    resources: [`${inboundBucket.bucketArn}/*`],
+    conditions: { StringEquals: { 'aws:Referer': backend.stack.account } },
+  })
+);
+
+// SES receipt rule: NOT managed here. Only one receipt rule set is ACTIVE per
+// region, and WorkMail already owns the active set (INBOUND_MAIL) for
+// jack-roberts.com — creating/activating a competing set would break WorkMail
+// inbound mail. So the rule routing `decode@app.jack-roberts.com` to this
+// bucket is added into the existing INBOUND_MAIL set out-of-band (CLI), not via
+// CloudFormation. The bucket + SES PutObject permission below are all CDK owns.
+// (Manual rule: ses create-receipt-rule --rule-set-name INBOUND_MAIL …)
+
+// S3 object-created → email-ingest Lambda.
+inboundBucket.addEventNotification(
+  s3.EventType.OBJECT_CREATED,
+  new s3n.LambdaDestination(ingestLambda),
+  { prefix: 'inbound/' }
+);
+inboundBucket.grantRead(ingestLambda);
+
+// Table access (least privilege): read the lookup tables; write DeviceToken
+// (endpoint ARN write-back) and CodeEvents.
+userProfileTable.grantReadData(ingestLambda);
+serviceLinkTable.grantReadData(ingestLambda);
+codeGroupTable.grantReadData(ingestLambda);
+deviceTable.grantReadWriteData(ingestLambda);
+codeEventsTable.grantReadWriteData(ingestLambda);
+
+// GSI Query grants (grantReadData does not cover secondary indexes).
+ingestLambda.addToRolePolicy(
+  new iam.PolicyStatement({
+    actions: ['dynamodb:Query'],
+    resources: [
+      `${serviceLinkTable.tableArn}/index/*`,
+      `${deviceTable.tableArn}/index/*`,
+    ],
+  })
+);
+
+backend.emailIngest.addEnvironment('USER_PROFILE_TABLE', userProfileTable.tableName);
+backend.emailIngest.addEnvironment('SERVICE_LINK_TABLE', serviceLinkTable.tableName);
+backend.emailIngest.addEnvironment('SERVICE_LINK_BY_EMAIL', SERVICE_LINK_BY_EMAIL_GSI);
+backend.emailIngest.addEnvironment('CODE_GROUP_TABLE', codeGroupTable.tableName);
+backend.emailIngest.addEnvironment('CODE_EVENTS_TABLE', codeEventsTable.tableName);
+backend.emailIngest.addEnvironment('DEVICE_TOKEN_TABLE', deviceTable.tableName);
+backend.emailIngest.addEnvironment('DEVICE_TOKEN_BY_EMAIL', DEVICE_BY_EMAIL_GSI);
+
+// --- SNS push (provisioned by default; set ENABLE_PUSH=false to skip) ------
+// Push is now ON by default — provisioned unless ENABLE_PUSH is explicitly set
+// to "false". It needs an Apple Developer account + an APNs auth key (.p8), so
+// the deploy shell must export the APNs vars (typically `source
+// ~/.apple-developer/flighttrack.env`):
 //
-//   export ENABLE_PUSH=true
 //   export APNS_SIGNING_KEY="$(cat AuthKey_XXXX.p8)"   # .p8 contents
 //   export APNS_KEY_ID=XXXXXXXXXX
 //   export APNS_TEAM_ID=YYYYYYYYYY
 //   export APNS_BUNDLE_ID=com.yourorg.flighttrack
 //   npx ampx sandbox            # (or pipeline-deploy with these in CI env)
 //
+// To deploy WITHOUT push (no APNs key available, e.g. a CI run that lacks the
+// secrets): `export ENABLE_PUSH=false`. Then DeviceToken rows are stored
+// without an SNS endpoint (PLATFORM_APP_ARN unset) and nothing is sent.
+//
 // These are read at SYNTH time from the deploy shell — NOT Amplify runtime
 // secrets — because the SNS platform application is infrastructure created by
 // CloudFormation. The .p8 contents land in the CFN template, so treat the
 // deploy environment as sensitive (CI secret store / local shell only).
-if (process.env.ENABLE_PUSH === 'true') {
+if (process.env.ENABLE_PUSH !== 'false') {
   const APNS_KEY = requireEnv('APNS_SIGNING_KEY');
   const APNS_KEY_ID = requireEnv('APNS_KEY_ID');
   const APNS_TEAM_ID = requireEnv('APNS_TEAM_ID');
@@ -165,19 +265,20 @@ if (process.env.ENABLE_PUSH === 'true') {
 
   const platformArn = platformApp.getResponseField('PlatformApplicationArn');
   backend.flightRefresh.addEnvironment('PLATFORM_APP_ARN', platformArn);
+  backend.emailIngest.addEnvironment('PLATFORM_APP_ARN', platformArn);
 
-  // The refresh Lambda creates endpoints on demand and publishes to them.
-  backend.flightRefresh.resources.lambda.addToRolePolicy(
-    new iam.PolicyStatement({
-      actions: [
-        'sns:CreatePlatformEndpoint',
-        'sns:SetEndpointAttributes',
-        'sns:GetEndpointAttributes',
-        'sns:Publish',
-      ],
-      resources: [platformArn, `${platformArn}/*`, 'arn:aws:sns:*:*:endpoint/*'],
-    })
-  );
+  // Both push Lambdas create endpoints on demand and publish to them.
+  const snsPushPolicy = new iam.PolicyStatement({
+    actions: [
+      'sns:CreatePlatformEndpoint',
+      'sns:SetEndpointAttributes',
+      'sns:GetEndpointAttributes',
+      'sns:Publish',
+    ],
+    resources: [platformArn, `${platformArn}/*`, 'arn:aws:sns:*:*:endpoint/*'],
+  });
+  backend.flightRefresh.resources.lambda.addToRolePolicy(snsPushPolicy);
+  backend.emailIngest.resources.lambda.addToRolePolicy(snsPushPolicy);
 }
 
 function requireEnv(name: string): string {
