@@ -47,4 +47,8 @@ jobs:
         run: npx ampx pipeline-deploy --branch "${GITHUB_REF_NAME}" --app-id "${AMPLIFY_APP_ID}"
         env:
           AMPLIFY_APP_ID: ${{ vars.AMPLIFY_APP_ID }}
+          # Push is on by default but needs the APNs .p8, which CI does not have.
+          # Disable push here so synth doesn't fail on the missing APNs vars; push
+          # is provisioned only from the local deploy that sources the APNs env.
+          ENABLE_PUSH: 'false'
         # AWS_PROFILE intentionally unset — the assumed role provides creds.
