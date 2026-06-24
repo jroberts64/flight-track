@@ -57,24 +57,58 @@ npx ampx sandbox        # deploys to your account + writes amplify_outputs.json
 Modeled on the `bin-builder` deploy pattern. The GitHub OIDC provider already
 exists account-wide (created by bin-builder), so we only add a repo-scoped role.
 
+CI deploys a **separate prod backend** (Amplify app `flight-track` /
+`d2ogdfod3pca1q`), distinct from your personal `ampx sandbox` stack. Full
+one-time bootstrap:
+
 ```bash
-# one-time: create the repo-scoped Amplify deploy role
 export AWS_PROFILE=personal-sso
-./deploy/bootstrap-oidc.sh        # prints the DeployRoleArn
+
+# 1. Repo-scoped Amplify deploy role. NOTE: pass the REAL GitHub repo name
+#    (flight-track), not the local dir (filght-track) — the OIDC trust policy is
+#    scoped to repo:jroberts64/<repo>:ref:refs/heads/main and must match exactly.
+GITHUB_REPO=flight-track ./deploy/bootstrap-oidc.sh   # prints the DeployRoleArn
+
+# 2. Amplify app + the `main` branch (pipeline-deploy requires the branch to
+#    already exist in the app, else it fails with "Branch main not found").
+aws amplify create-app    --name flight-track --region us-east-1   # note the appId
+aws amplify create-branch --app-id <appId> --branch-name main --region us-east-1
 ```
 
 Then in GitHub (repo → Settings → Secrets and variables → Actions → **Variables**) set:
 - `AWS_DEPLOY_ROLE_ARN` → the printed role ARN
-- `AMPLIFY_APP_ID` → your Amplify app id (from the Amplify console)
+- `AMPLIFY_APP_ID` → the Amplify app id from step 2
 
 `.github/workflows/deploy-backend.yml` then runs `ampx pipeline-deploy` on every
 push to `main`, assuming that role via a short-lived OIDC token.
+
+> **CI runs with `ENABLE_PUSH=false`** (set in the workflow): push is on by
+> default but needs the APNs `.p8`, which CI doesn't have, so synth would
+> otherwise throw on the missing `APNS_*` vars. The prod env therefore has push
+> OFF until you wire APNs secrets into CI. Your sandbox keeps push on.
 
 > Scope note: the CI role uses the AWS-managed `AmplifyBackendDeployFullAccess`
 > policy. Amplify Gen 2 provisions Cognito/AppSync/DynamoDB/Lambda/IAM via CDK,
 > so its action set isn't cleanly hand-enumerable — this is the AWS-documented
 > grant for backend CI deploys. It's broader than bin-builder's tight
 > S3+CloudFront role; that's inherent to deploying a stateful backend vs a static site.
+
+### GitHub account for this repo (multi-account machines)
+
+This repo lives at **`jroberts64/flight-track`**. If your machine has more than
+one GitHub account in `gh` (e.g. a work account), `gh`'s single "active account"
+can flip to the wrong one and `git push` is denied with HTTP 403.
+
+To pin **this repo only** to `jroberts64` (no global changes):
+
+```bash
+./deploy/setup-git-account.sh
+```
+
+This sets repo-local commit identity and routes GitHub credential lookups
+through `deploy/git-credential-jroberts64.sh`, which serves the `jroberts64`
+token regardless of `gh`'s global active account. Both files are committed;
+re-run the setup script after a fresh clone. Global git/`gh` config is untouched.
 
 ### 2. FlightAware AeroAPI key (server-side only)
 

@@ -39,7 +39,7 @@ real-time family sync run on AWS Amplify Gen 2.
 | `FlightTrack/ViewModels/` | `FlightsViewModel`, `ConnectionsViewModel`, `CodeGroupsViewModel`. |
 | `FlightTrack/Views/` | SwiftUI screens: auth, my-flights + add-flight, connections, flight row, codes (groups + service links). |
 | `FlightTrack/Config/` | `SETUP.md` (Xcode project creation + secret setup). |
-| `deploy/` | `github-oidc.yaml` (CI deploy role), `bootstrap-oidc.sh` (one-time role create). |
+| `deploy/` | `github-oidc.yaml` (CI deploy role), `bootstrap-oidc.sh` (one-time role create), `setup-git-account.sh` + `git-credential-jroberts64.sh` (pin repo push-auth to the jroberts64 account). |
 | `.github/workflows/deploy-backend.yml` | CI: `ampx pipeline-deploy` on push to main via OIDC. |
 
 ## AWS access
@@ -49,7 +49,20 @@ Account **`019135476568`**, region **`us-east-1`**.
 - **Local:** `aws sso login --sso-session personal-sso` then `export AWS_PROFILE=personal-sso`.
 - **CI:** GitHub Actions OIDC — no stored secrets. The OIDC provider is account-wide and
   already exists (created by the `bin-builder` repo); `github-oidc.yaml` reuses it
-  (`CreateOIDCProvider=false`) and adds a repo+branch-scoped role.
+  (`CreateOIDCProvider=false`) and adds a repo+branch-scoped role. CI deploys a SEPARATE
+  prod Amplify app (`flight-track` / `d2ogdfod3pca1q`), not your `ampx sandbox` stack, and
+  runs with **`ENABLE_PUSH=false`** (no APNs `.p8` in CI). Bootstrap details + gotchas
+  (`/service-role/` policy path, `GITHUB_REPO=flight-track` override, the app's `main`
+  branch must pre-exist) are in the README "CI deploys" section.
+
+## GitHub account (push auth)
+
+The repo is **`jroberts64/flight-track`**. `gh`'s single active account can flip to another
+account on this machine → `git push` 403s ("denied to jroberts-juicerpricing"). This repo is
+pinned LOCALLY to `jroberts64` via `deploy/setup-git-account.sh` (sets repo-local user +
+routes credentials through `deploy/git-credential-jroberts64.sh`, which serves the jroberts64
+token regardless of gh's active account). If a push still 403s, run that script (or
+`gh auth switch --user jroberts64`). Never change global git/gh config to fix it.
 
 ## Commands
 
