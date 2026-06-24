@@ -69,7 +69,8 @@ Resources:
         # action set is broad and not cleanly hand-enumerable — this managed
         # policy is the AWS-documented grant for backend CI deploys.
         # https://docs.amplify.aws/swift/deploy-and-host/fullstack-branching/
-        - arn:aws:iam::aws:policy/AmplifyBackendDeployFullAccess
+        # NOTE: this managed policy lives under the /service-role/ path.
+        - arn:aws:iam::aws:policy/service-role/AmplifyBackendDeployFullAccess
 
 Outputs:
   DeployRoleArn:
