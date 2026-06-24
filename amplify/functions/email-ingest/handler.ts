@@ -72,7 +72,14 @@ async function processOne(bucket: string, key: string): Promise<void> {
 
   const fromEmail = (mail.from?.value?.[0]?.address ?? '').toLowerCase().trim();
   const subject = mail.subject ?? '';
-  const body = `${mail.text ?? ''}\n${mail.html || ''}`;
+  // Prefer the plain-text body for code extraction — the HTML source is full of
+  // numeric noise (hex colors, message-ids, timestamps) that wrecks a digit
+  // regex. Fall back to HTML with tags stripped only if there's no text part.
+  const textBody = mail.text ?? '';
+  const htmlStripped = mail.html ? String(mail.html).replace(/<[^>]+>/g, ' ') : '';
+  const body = textBody || htmlStripped;
+  // Matching (service identification) can still look at everything.
+  const matchBody = `${textBody}\n${htmlStripped}`;
 
   if (!fromEmail) {
     console.log('email-ingest: no From: address, dropping');
@@ -92,13 +99,13 @@ async function processOne(bucket: string, key: string): Promise<void> {
 
   // 2) Find the first enabled ServiceLink whose rules match this email.
   const links = await serviceLinksFor(fromEmail);
-  const link = links.find((l) => l.enabled !== false && matches(l, fromEmail, subject, body));
+  const link = links.find((l) => l.enabled !== false && matches(l, fromEmail, subject, matchBody));
   if (!link) {
     console.log(`email-ingest: no matching ServiceLink for ${fromEmail}, dropping`);
     return;
   }
 
-  // 3) Extract the code.
+  // 3) Extract the code from the human-readable body.
   const code = extractCode(link.matchRules, body, subject);
   if (!code) {
     console.log(`email-ingest: no code found for service ${link.serviceName}, dropping`);
@@ -140,18 +147,33 @@ async function processOne(bucket: string, key: string): Promise<void> {
   console.log(`email-ingest: pushed ${link.serviceName} code to ${arns.length} endpoint(s)`);
 }
 
-/** UserProfile by email. Scan-with-filter is fine for a small-group app. */
+/**
+ * UserProfile by email. Scan-with-filter is fine for a small-group app.
+ *
+ * NOTE: do NOT use `Limit: 1` here. In DynamoDB, Limit caps items EXAMINED, not
+ * items MATCHED — the filter is applied after the page is read. `Limit: 1` would
+ * read a single (arbitrary) row and only match if that one happened to be the
+ * right profile, silently dropping legitimate senders. Page through instead and
+ * compare case-insensitively. The caller already lowercases `email`.
+ */
 async function findUserByEmail(email: string): Promise<Record<string, any> | null> {
-  const out = await ddb.send(
-    new ScanCommand({
-      TableName: USER_PROFILE_TABLE,
-      FilterExpression: '#e = :e',
-      ExpressionAttributeNames: { '#e': 'email' },
-      ExpressionAttributeValues: { ':e': email },
-      Limit: 1,
-    })
-  );
-  return out.Items?.[0] ?? null;
+  const target = email.toLowerCase().trim();
+  let ExclusiveStartKey: Record<string, any> | undefined;
+  do {
+    const out = await ddb.send(
+      new ScanCommand({
+        TableName: USER_PROFILE_TABLE,
+        ProjectionExpression: 'id, email',
+        ExclusiveStartKey,
+      })
+    );
+    const hit = (out.Items ?? []).find(
+      (it) => String(it.email ?? '').toLowerCase().trim() === target
+    );
+    if (hit) return hit;
+    ExclusiveStartKey = out.LastEvaluatedKey;
+  } while (ExclusiveStartKey);
+  return null;
 }
 
 async function serviceLinksFor(ownerEmail: string): Promise<Record<string, any>[]> {
@@ -206,12 +228,32 @@ function matches(
   return Boolean(rules.fromContains || rules.subjectContains);
 }
 
+/** A bare 4-digit run that looks like a calendar year (1900–2099). */
+function looksLikeYear(s: string): boolean {
+  return /^(19|20)\d{2}$/.test(s);
+}
+
 function extractCode(matchRules: string | undefined, body: string, subject: string): string | null {
   const rules = parseRules(matchRules);
   const text = `${subject}\n${body}`;
-  const re = new RegExp(rules.codeRegex || '\\b(\\d{4,8})\\b');
-  const m = text.match(re);
-  if (!m) return null;
-  // Prefer the first capture group if the regex defines one, else the whole match.
-  return (m[1] ?? m[0]).trim();
+
+  // If the rule supplies an explicit codeRegex, honor it verbatim (advanced /
+  // custom services). First capture group wins, else the whole match.
+  if (rules.codeRegex) {
+    const m = text.match(new RegExp(rules.codeRegex));
+    if (m) return (m[1] ?? m[0]).trim();
+    return null;
+  }
+
+  // Default smart extraction. Raw bodies contain many 4–8 digit runs (years,
+  // timestamps); "first match" is unreliable. Prefer a digit run that appears
+  // right after a code label, then fall back to the first non-year run.
+  const labeled = text.match(
+    /(?:one[- ]?time\s+code|verification\s+code|passcode|security\s+code|your\s+code|code(?:\s+is)?)\D{0,40}?(\d{4,8})/i
+  );
+  if (labeled) return labeled[1].trim();
+
+  const all = text.match(/\b\d{4,8}\b/g) ?? [];
+  const nonYear = all.find((d) => !(d.length === 4 && looksLikeYear(d)));
+  return (nonYear ?? all[0] ?? '').trim() || null;
 }

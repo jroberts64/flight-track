@@ -40,22 +40,27 @@ struct ServicePreset: Identifiable, Hashable {
     var name: String
     var matchRules: String
 
+    // Presets intentionally OMIT codeRegex: the backend's smart default
+    // extraction (label-aware, year-avoiding) handles code-style emails far
+    // better than a bare \d{4,8} run, which matches years/timestamps first.
+    // Set codeRegex only for a "custom" service whose code needs a specific
+    // pattern.
     static let presets: [ServicePreset] = [
         ServicePreset(
             name: "HBO Max",
-            matchRules: #"{"fromContains":"hbomax.com","subjectContains":"code","codeRegex":"\\b(\\d{4,8})\\b"}"#
+            matchRules: #"{"fromContains":"hbomax.com","subjectContains":"code"}"#
         ),
         ServicePreset(
             name: "Netflix",
-            matchRules: #"{"fromContains":"netflix.com","subjectContains":"code","codeRegex":"\\b(\\d{4,8})\\b"}"#
+            matchRules: #"{"fromContains":"netflix.com","subjectContains":"code"}"#
         ),
         ServicePreset(
             name: "Disney+",
-            matchRules: #"{"fromContains":"disneyplus.com","subjectContains":"code","codeRegex":"\\b(\\d{4,8})\\b"}"#
+            matchRules: #"{"fromContains":"disneyplus.com","subjectContains":"code"}"#
         ),
         ServicePreset(
             name: "Hulu",
-            matchRules: #"{"fromContains":"hulu.com","subjectContains":"code","codeRegex":"\\b(\\d{4,8})\\b"}"#
+            matchRules: #"{"fromContains":"hulu.com","subjectContains":"code"}"#
         ),
     ]
 }

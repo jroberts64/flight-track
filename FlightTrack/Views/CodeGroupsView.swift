@@ -110,6 +110,17 @@ struct CodeGroupsView: View {
                     }
                 }
             }
+
+            // Explicit add affordance inside the section (the toolbar + menu also
+            // works). Disabled with a hint until at least one group exists.
+            if vm.groups.isEmpty {
+                Text("Create a group first, then link a service to it.")
+                    .font(.footnote).foregroundStyle(.secondary)
+            } else {
+                Button { showingAddService = true } label: {
+                    Label("Link a Service", systemImage: "key")
+                }
+            }
         }
     }
 }
